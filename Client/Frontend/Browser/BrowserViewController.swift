@@ -561,7 +561,7 @@ class BrowserViewController: UIViewController {
         let onlyNoHistoryTabs = !tabsToRestore.every {
             if $0.sessionData?.urls.count > 1 {
                 if let url = $0.sessionData?.urls.first {
-                    return !url.isAboutHomeURL()
+                    return !url.isAboutHomeURL
                 }
             }
             return false
@@ -722,7 +722,7 @@ class BrowserViewController: UIViewController {
             homePanelController.profile = profile
             homePanelController.delegate = self
             homePanelController.appStateDelegate = self
-            homePanelController.url = tabManager.selectedTab?.displayURL
+            homePanelController.url = tabManager.selectedTab?.url?.displayURL
             homePanelController.view.alpha = 0
             self.homePanelController = homePanelController
 
@@ -783,7 +783,7 @@ class BrowserViewController: UIViewController {
 
     private func updateInContentHomePanel(url: NSURL?) {
         if !urlBar.inOverlayMode {
-            if let url = url where url.isAboutHomeURL() {
+            if let url = url where url.isAboutHomeURL {
                 showHomePanelController(inline: true)
             } else {
                 hideHomePanelController()
@@ -974,7 +974,7 @@ class BrowserViewController: UIViewController {
         scrollController.showToolbars(animated: false)
 
         if let url = tab.url {
-            if url.isReaderModeURL() {
+            if url.isReaderModeURL {
                 showReaderModeBar(animated: false)
                 NSNotificationCenter.defaultCenter().addObserver(self, selector: #selector(BrowserViewController.SELDynamicFontChanged(_:)), name: NotificationDynamicFontChanged, object: nil)
             } else {
@@ -998,12 +998,12 @@ class BrowserViewController: UIViewController {
     /// Updates the URL bar text and button states.
     /// Call this whenever the page URL changes.
     private func updateURLBarDisplayURL(tab: Tab) {
-        urlBar.currentURL = tab.displayURL
+        urlBar.currentURL = tab.url?.displayURL
 
-        let isPage = tab.displayURL?.isWebPage() ?? false
+        let isPage = tab.url?.displayURL?.isWebPage() ?? false
         navigationToolbar.updatePageStatus(isWebPage: isPage)
 
-        guard let url = tab.displayURL?.absoluteString else {
+        guard let url = tab.url?.displayURL?.absoluteString else {
             return
         }
 
@@ -1457,7 +1457,7 @@ extension BrowserViewController: URLBarDelegate {
 
     func urlBarDidLongPressReaderMode(urlBar: URLBarView) -> Bool {
         guard let tab = tabManager.selectedTab,
-               url = tab.displayURL,
+               url = tab.url?.displayURL,
                absoluteString = url.absoluteString,
                result = profile.readingList?.createRecordWithURL(absoluteString, title: tab.title ?? "", addedBy: UIDevice.currentDevice().name)
             else {
@@ -1487,7 +1487,7 @@ extension BrowserViewController: URLBarDelegate {
     func urlBarDisplayTextForURL(url: NSURL?) -> String? {
         // use the initial value for the URL so we can do proper pattern matching with search URLs
         var searchURL = self.tabManager.selectedTab?.currentInitialURL
-        if searchURL == nil || searchURL!.isErrorPageURL() {
+        if searchURL?.isErrorPageURL ?? true {
             searchURL = url
         }
         return profile.searchEngines.queryForSearchURL(searchURL) ?? url?.absoluteString
@@ -1670,7 +1670,7 @@ extension BrowserViewController: TabToolbarDelegate {
 
     func tabToolbarDidPressBookmark(tabToolbar: TabToolbarProtocol, button: UIButton) {
         guard let tab = tabManager.selectedTab,
-            let _ = tab.displayURL?.absoluteString else {
+            let _ = tab.url?.displayURL?.absoluteString else {
                 log.error("Bookmark error: No tab is selected, or no URL in tab.")
                 return
         }
@@ -1682,7 +1682,7 @@ extension BrowserViewController: TabToolbarDelegate {
     }
 
     func tabToolbarDidPressShare(tabToolbar: TabToolbarProtocol, button: UIButton) {
-        if let tab = tabManager.selectedTab, url = tab.displayURL {
+        if let tab = tabManager.selectedTab, url = tab.url?.displayURL {
             let sourceView = self.navigationToolbar.shareButton
             presentActivityViewController(url, tab: tab, sourceView: sourceView.superview, sourceRect: sourceView.frame, arrowDirection: .Up)
         }
@@ -1967,7 +1967,7 @@ extension BrowserViewController: HomePanelViewControllerDelegate {
     }
 
     func homePanelViewController(homePanelViewController: HomePanelViewController, didSelectPanel panel: Int) {
-        if let url = tabManager.selectedTab?.url where url.isAboutHomeURL() {
+        if let url = tabManager.selectedTab?.url where url.isAboutHomeURL {
             tabManager.selectedTab?.webView?.evaluateJavaScript("history.replaceState({}, '', '#panel=\(panel)')", completionHandler: nil)
         }
     }
@@ -2042,7 +2042,7 @@ extension BrowserViewController: TabManagerDelegate {
 
             if let url = webView.URL, absoluteString = url.absoluteString {
                 // Don't bother fetching bookmark state for about/sessionrestore and about/home.
-                if url.isAboutURL() {
+                if url.isAboutURL {
                     // Indeed, because we don't show the toolbar at all, don't even blank the star.
                 } else {
                     profile.bookmarks.modelFactory >>== { [weak tab] in
@@ -2113,7 +2113,7 @@ extension BrowserViewController: TabManagerDelegate {
         // tabDelegate is a weak ref (and the tab's webView may not be destroyed yet)
         // so we don't expcitly unset it.
 
-        if let url = tab.url where !url.isAboutURL() && !tab.isPrivate {
+        if let url = tab.url where !url.isAboutURL && !tab.isPrivate {
             profile.recentlyClosedTabs.addTab(url, title: tab.title, faviconURL: tab.displayFavicon?.url)
         }
     }
@@ -2165,7 +2165,7 @@ extension BrowserViewController: WKNavigationDelegate {
         // are going to a about:reader page. Then we keep it on screen: it will change status
         // (orange color) as soon as the page has loaded.
         if let url = webView.URL {
-            if !url.isReaderModeURL() {
+            if !url.isReaderModeURL {
                 urlBar.updateReaderModeState(ReaderModeState.Unavailable)
                 hideReaderModeBar(animated: false)
             }
@@ -2341,7 +2341,7 @@ extension BrowserViewController: WKNavigationDelegate {
         let tab: Tab! = tabManager[webView]
         tabManager.expireSnackbars()
 
-        if let url = webView.URL where !url.isErrorPageURL() && !url.isAboutHomeURL() {
+        if let url = webView.URL where !url.isErrorPageURL && !url.isAboutHomeURL {
             tab.lastExecutedTime = NSDate.now()
 
             if navigation == nil {
@@ -2410,7 +2410,7 @@ extension BrowserViewController: WKNavigationDelegate {
     private func postLocationChangeNotificationForTab(tab: Tab, navigation: WKNavigation?) {
         let notificationCenter = NSNotificationCenter.defaultCenter()
         var info = [NSObject: AnyObject]()
-        info["url"] = tab.displayURL
+        info["url"] = tab.url?.displayURL
         info["title"] = tab.title
         if let visitType = self.getVisitTypeForTab(tab, navigation: navigation)?.rawValue {
             info["visitType"] = visitType
@@ -2506,7 +2506,7 @@ extension BrowserViewController: WKUIDelegate {
 
         if error.code == Int(CFNetworkErrors.CFURLErrorCancelled.rawValue) {
             if let tab = tabManager[webView] where tab === tabManager.selectedTab {
-                urlBar.currentURL = tab.displayURL
+                urlBar.currentURL = tab.url?.displayURL
             }
             return
         }
@@ -2518,7 +2518,7 @@ extension BrowserViewController: WKUIDelegate {
             // disabled in settings, for example), we'll fail to load the session restore URL.
             // We rely on loading that page to get the restore callback to reset the restoring
             // flag, so if we fail to load that page, reset it here.
-            if url.getAboutComponent() == "sessionrestore" {
+            if url.aboutComponent == "sessionrestore" {
                 tabManager.tabs.filter { $0.webView == webView }.first?.restoring = false
             }
         }
@@ -2625,7 +2625,7 @@ extension BrowserViewController {
             } else {
                 readerModeBar.applyTheme(Theme.NormalMode)
             }
-            if let url = self.tabManager.selectedTab?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
+            if let url = self.tabManager.selectedTab?.url?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
                 if let successValue = result.successValue, record = successValue {
                     readerModeBar.unread = record.unread
                     readerModeBar.added = true
@@ -2706,7 +2706,7 @@ extension BrowserViewController {
             let forwardList = webView.backForwardList.forwardList
 
             if let currentURL = webView.backForwardList.currentItem?.URL {
-                if let originalURL = currentURL.decodeReaderModeURL() {
+                if let originalURL = currentURL.decodeReaderModeURL {
                     if backList.count > 1 && backList.last?.URL == originalURL {
                         webView.goToBackForwardListItem(backList.last!)
                     } else if forwardList.count > 0 && forwardList.first?.URL == originalURL {
@@ -2773,7 +2773,7 @@ extension BrowserViewController: ReaderModeBarViewDelegate {
             }
 
         case .MarkAsRead:
-            if let url = self.tabManager.selectedTab?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
+            if let url = self.tabManager.selectedTab?.url?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
                 if let successValue = result.successValue, record = successValue {
                     profile.readingList?.updateRecord(record, unread: false) // TODO Check result, can this fail?
                     readerModeBar.unread = false
@@ -2781,7 +2781,7 @@ extension BrowserViewController: ReaderModeBarViewDelegate {
             }
 
         case .MarkAsUnread:
-            if let url = self.tabManager.selectedTab?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
+            if let url = self.tabManager.selectedTab?.url?.displayURL?.absoluteString, result = profile.readingList?.getRecordWithURL(url) {
                 if let successValue = result.successValue, record = successValue {
                     profile.readingList?.updateRecord(record, unread: true) // TODO Check result, can this fail?
                     readerModeBar.unread = true
@@ -2790,8 +2790,8 @@ extension BrowserViewController: ReaderModeBarViewDelegate {
 
         case .AddToReadingList:
             if let tab = tabManager.selectedTab,
-               let rawURL = tab.url where rawURL.isReaderModeURL(),
-               let url = rawURL.decodeReaderModeURL(),
+               let rawURL = tab.url where rawURL.isReaderModeURL,
+               let url = rawURL.decodeReaderModeURL,
                let absoluteString = url.absoluteString {
                     profile.readingList?.createRecordWithURL(absoluteString, title: tab.title ?? "", addedBy: UIDevice.currentDevice().name) // TODO Check result, can this fail?
                     readerModeBar.added = true
@@ -2799,7 +2799,7 @@ extension BrowserViewController: ReaderModeBarViewDelegate {
             }
 
         case .RemoveFromReadingList:
-            if let url = self.tabManager.selectedTab?.displayURL?.absoluteString,
+            if let url = self.tabManager.selectedTab?.url?.displayURL?.absoluteString,
                let result = profile.readingList?.getRecordWithURL(url),
                let successValue = result.successValue,
                let record = successValue {
@@ -3034,7 +3034,7 @@ extension BrowserViewController {
 
     func addCustomSearchButtonToWebView(webView: WKWebView) {
         //check if the search engine has already been added.
-        let domain = webView.URL?.domainURL().host
+        let domain = webView.URL?.domainURL.host
         let matches = self.profile.searchEngines.orderedEngines.filter {$0.shortName == domain}
         if !matches.isEmpty {
             self.customSearchEngineButton.tintColor = UIColor.grayColor()
@@ -3111,7 +3111,7 @@ extension BrowserViewController {
         guard searchQuery != "",
             let iconURL = NSURL(string: favicon.url),
             let url = NSURL(string: searchQuery.stringByAddingPercentEncodingWithAllowedCharacters(NSCharacterSet.URLFragmentAllowedCharacterSet())!),
-            let shortName = url.domainURL().host else {
+            let shortName = url.domainURL.host else {
                 let alert = ThirdPartySearchAlerts.failedToAddThirdPartySearch()
                 self.presentViewController(alert, animated: true, completion: nil)
                 return
