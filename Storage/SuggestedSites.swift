@@ -5,44 +5,34 @@
 import UIKit
 import Shared
 
-
-public class SuggestedSite: Site {
-    public let wordmark: Favicon
-    public let backgroundColor: UIColor
-
-    override public var tileURL: NSURL {
-        return NSURL(string: url) ?? NSURL(string: "about:blank")!
+open class SuggestedSite: Site {
+    override open var tileURL: URL {
+        return URL(string: url as String) ?? URL(string: "about:blank")!
     }
 
     let trackingId: Int
     init(data: SuggestedSiteData) {
-        self.backgroundColor = UIColor(colorString: data.bgColor)
         self.trackingId = data.trackingId
-        self.wordmark = Favicon(url: data.imageUrl, date: NSDate(), type: .Icon)
         super.init(url: data.url, title: data.title, bookmarked: nil)
-        self.icon = Favicon(url: data.faviconUrl, date: NSDate(), type: .Icon)
-    }
-
-    public var faviconImagePath: String? {
-        return wordmark.url.stringByReplacingOccurrencesOfString("asset://suggestedsites", withString: "as")
+        self.guid = "default" + data.title // A guid is required in the case the site might become a pinned site
     }
 }
 
 public let SuggestedSites: SuggestedSitesCursor = SuggestedSitesCursor()
 
-public class SuggestedSitesCursor: ArrayCursor<SuggestedSite> {
-    private init() {
-        let locale = NSLocale.currentLocale()
-        let sites = DefaultSuggestedSites.sites[locale.localeIdentifier] ??
+open class SuggestedSitesCursor: ArrayCursor<SuggestedSite> {
+    fileprivate init() {
+        let locale = Locale.current
+        let sites = DefaultSuggestedSites.sites[locale.identifier] ??
                     DefaultSuggestedSites.sites["default"]! as Array<SuggestedSiteData>
         let tiles = sites.map({ data -> SuggestedSite in
             var site = data
-            if let domainMap = DefaultSuggestedSites.urlMap[data.url], let localizedURL = domainMap[locale.localeIdentifier] {
+            if let domainMap = DefaultSuggestedSites.urlMap[data.url], let localizedURL = domainMap[locale.identifier] {
                 site.url = localizedURL
             }
             return SuggestedSite(data: site)
         })
-        super.init(data: tiles, status: .Success, statusMessage: "Loaded")
+        super.init(data: tiles, status: .success, statusMessage: "Loaded")
     }
 }
 

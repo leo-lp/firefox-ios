@@ -5,38 +5,45 @@
 import Foundation
 import UIKit
 
-public class MailtoLinkHandler {
+open class MailtoLinkHandler {
 
-    lazy var mailSchemeProviders: [String:MailProvider] = self.fetchMailSchemeProviders()
+    lazy var mailSchemeProviders: [String: MailProvider] = self.fetchMailSchemeProviders()
 
-    func launchMailClientForScheme(scheme: String, metadata: MailToMetadata, defaultMailtoURL: NSURL) {
+    func launchMailClientForScheme(_ scheme: String, metadata: MailToMetadata, defaultMailtoURL: URL) {
         guard let provider = mailSchemeProviders[scheme], let mailURL = provider.newEmailURLFromMetadata(metadata) else {
-            UIApplication.sharedApplication().openURL(defaultMailtoURL)
+            UIApplication.shared.open(defaultMailtoURL, options: [:])
             return
         }
 
-        if UIApplication.sharedApplication().canOpenURL(mailURL) {
-            UIApplication.sharedApplication().openURL(mailURL)
+        if UIApplication.shared.canOpenURL(mailURL) {
+            UIApplication.shared.open(mailURL, options: [:])
         } else {
-            UIApplication.sharedApplication().openURL(defaultMailtoURL)
+            UIApplication.shared.open(defaultMailtoURL, options: [:])
         }
     }
 
-    func fetchMailSchemeProviders() -> [String:MailProvider] {
-        var providerDict = [String:MailProvider]()
-        if let path = NSBundle.mainBundle().pathForResource("MailSchemes", ofType: "plist"), let dictRoot = NSArray(contentsOfFile: path) {
+    func fetchMailSchemeProviders() -> [String: MailProvider] {
+        var providerDict = [String: MailProvider]()
+        if let path = Bundle.main.path(forResource: "MailSchemes", ofType: "plist"), let dictRoot = NSArray(contentsOfFile: path) {
             dictRoot.forEach({ dict in
-                let scheme = dict["scheme"] as! String
-                if scheme == "readdle-spark://" {
-                    providerDict[scheme] = ReaddleSparkIntegration()
-                } else if scheme == "mymail-mailto://" {
-                    providerDict[scheme] = MyMailIntegration()
-                } else if scheme == "mailru-mailto://" {
-                    providerDict[scheme] = MailRuIntegration()
-                } else if scheme == "airmail://" {
-                    providerDict[scheme] = AirmailIntegration()
-                } else if scheme == "ms-outlook://" {
-                    providerDict[scheme] = MSOutlookIntegration()
+                if let schemeDict = dict as? [String: Any], let scheme = schemeDict["scheme"] as? String {
+                    if scheme == "readdle-spark://" {
+                        providerDict[scheme] = ReaddleSparkIntegration()
+                    } else if scheme == "mymail-mailto://" {
+                        providerDict[scheme] = MyMailIntegration()
+                    } else if scheme == "mailru-mailto://" {
+                        providerDict[scheme] = MailRuIntegration()
+                    } else if scheme == "airmail://" {
+                        providerDict[scheme] = AirmailIntegration()
+                    } else if scheme == "ms-outlook://" {
+                        providerDict[scheme] = MSOutlookIntegration()
+                    } else if scheme == "ymail://" {
+                        providerDict[scheme] = YMailIntegration()
+                    } else if scheme == "googlegmail://" {
+                        providerDict[scheme] = GoogleGmailIntegration()
+                    } else if scheme == "inbox-gmail://" {
+                        providerDict[scheme] = GoogleInboxIntegration()
+                    }
                 }
             })
         }

@@ -20,9 +20,8 @@ typealias SearchLoader = _SearchLoader<AnyObject, AnyObject>
  * Since both of these use the same SQL query, we can perform the query once and dispatch the results.
  */
 class _SearchLoader<UnusedA, UnusedB>: Loader<Cursor<Site>, SearchViewController> {
-    private let profile: Profile
-    private let urlBar: URLBarView
-    private var inProgress: Cancellable? = nil
+    fileprivate let profile: Profile
+    fileprivate let urlBar: URLBarView
 
     init(profile: Profile, urlBar: URLBarView) {
         self.profile = profile
@@ -30,28 +29,42 @@ class _SearchLoader<UnusedA, UnusedB>: Loader<Cursor<Site>, SearchViewController
         super.init()
     }
 
-    private lazy var topDomains: [String] = {
-        let filePath = NSBundle.mainBundle().pathForResource("topdomains", ofType: "txt")
-        return try! String(contentsOfFile: filePath!).componentsSeparatedByString("\n")
+    fileprivate lazy var topDomains: [String] = {
+        let filePath = Bundle.main.path(forResource: "topdomains", ofType: "txt")
+        return try! String(contentsOfFile: filePath!).components(separatedBy: "\n")
     }()
+
+    // `weak` usage here allows deferred queue to be the owner. The deferred is always filled and this set to nil,
+    // this is defensive against any changes to queue (or cancellation) behaviour in future.
+    private weak var currentDbQuery: Cancellable?
 
     var query: String = "" {
         didSet {
-            if query.isEmpty {
-                self.load(Cursor(status: .Success, msg: "Empty query"))
+            guard let profile = self.profile as? BrowserProfile else {
+                assertionFailure("nil profile")
                 return
             }
 
-            if let inProgress = inProgress {
-                inProgress.cancel()
-                self.inProgress = nil
+            if query.isEmpty {
+                self.load(Cursor(status: .success, msg: "Empty query"))
+                return
+            }
+
+            if let currentDbQuery = currentDbQuery {
+                profile.db.cancel(databaseOperation: WeakRef(currentDbQuery))
             }
 
             let deferred = self.profile.history.getSitesByFrecencyWithHistoryLimit(100, bookmarksLimit: 5, whereURLContains: query)
-            inProgress = deferred as? Cancellable
+            currentDbQuery = deferred as? Cancellable
 
-            deferred.uponQueue(dispatch_get_main_queue()) { result in
-                self.inProgress = nil
+            deferred.uponQueue(DispatchQueue.main) { result in
+                defer {
+                    self.currentDbQuery = nil
+                }
+
+                guard let deferred = deferred as? Cancellable, !deferred.cancelled else {
+                    return
+                }
 
                 // Failed cursors are excluded in .get().
                 if let cursor = result.successValue {
@@ -59,7 +72,7 @@ class _SearchLoader<UnusedA, UnusedB>: Loader<Cursor<Site>, SearchViewController
                     self.load(cursor)
                     for site in cursor {
                         if let url = site?.url,
-                               completion = self.completionForURL(url) {
+                               let completion = self.completionForURL(url) {
                             self.urlBar.setAutocompleteSuggestion(completion)
                             return
                         }
@@ -77,17 +90,21 @@ class _SearchLoader<UnusedA, UnusedB>: Loader<Cursor<Site>, SearchViewController
         }
     }
 
-    private func completionForURL(url: String) -> String? {
+    fileprivate func completionForURL(_ url: String) -> String? {
         // Extract the pre-path substring from the URL. This should be more efficient than parsing via
         // NSURL since we need to only look at the beginning of the string.
         // Note that we won't match non-HTTP(S) URLs.
-        guard let match = URLBeforePathRegex.firstMatchInString(url, options: NSMatchingOptions(), range: NSRange(location: 0, length: url.characters.count)) else {
+        guard let match = URLBeforePathRegex.firstMatch(in: url, options: NSRegularExpression.MatchingOptions(), range: NSRange(location: 0, length: url.characters.count)) else {
             return nil
         }
 
         // If the pre-path component (including the scheme) starts with the query, just use it as is.
-        let prePathURL = (url as NSString).substringWithRange(match.rangeAtIndex(0))
+        var prePathURL = (url as NSString).substring(with: match.rangeAt(0))
         if prePathURL.startsWith(query) {
+            // Trailing slashes in the autocompleteTextField cause issues with Swype keyboard. Bug 1194714
+            if prePathURL.endsWith("/") {
+                prePathURL.remove(at: prePathURL.index(before: prePathURL.endIndex))
+            }
             return prePathURL
         }
 
@@ -95,18 +112,18 @@ class _SearchLoader<UnusedA, UnusedB>: Loader<Cursor<Site>, SearchViewController
         // To simplify the search, prepend a ".", and search the string for ".query".
         // For example, for http://en.m.wikipedia.org, domainWithDotPrefix will be ".en.m.wikipedia.org".
         // This allows us to use the "." as a separator, so we can match "en", "m", "wikipedia", and "org",
-        let domain = (url as NSString).substringWithRange(match.rangeAtIndex(1))
+        let domain = (url as NSString).substring(with: match.rangeAt(1))
         return completionForDomain(domain)
     }
 
-    private func completionForDomain(domain: String) -> String? {
+    fileprivate func completionForDomain(_ domain: String) -> String? {
         let domainWithDotPrefix: String = ".\(domain)"
-        if let range = domainWithDotPrefix.rangeOfString(".\(query)", options: NSStringCompareOptions.CaseInsensitiveSearch, range: nil, locale: nil) {
+        if let range = domainWithDotPrefix.range(of: ".\(query)", options: NSString.CompareOptions.caseInsensitive, range: nil, locale: nil) {
             // We don't actually want to match the top-level domain ("com", "org", etc.) by itself, so
             // so make sure the result includes at least one ".".
-            let matchedDomain: String = domainWithDotPrefix.substringFromIndex(range.startIndex.advancedBy(1))
+            let matchedDomain: String = domainWithDotPrefix.substring(from: domainWithDotPrefix.index(range.lowerBound, offsetBy: 1))
             if matchedDomain.contains(".") {
-                return matchedDomain + "/"
+                return matchedDomain
             }
         }
 

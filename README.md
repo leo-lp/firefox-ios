@@ -1,18 +1,20 @@
-Firefox for iOS [![codebeat badge](https://codebeat.co/badges/67e58b6d-bc89-4f22-ba8f-7668a9c15c5a)](https://codebeat.co/projects/github-com-mozilla-firefox-ios) [![BuddyBuild](https://dashboard.buddybuild.com/api/statusImage?appID=57bf25c0f096bc01001e21e0&branch=master&build=latest)](https://dashboard.buddybuild.com/apps/57bf25c0f096bc01001e21e0/build/latest)
+Firefox for iOS [![codebeat badge](https://codebeat.co/badges/67e58b6d-bc89-4f22-ba8f-7668a9c15c5a)](https://codebeat.co/projects/github-com-mozilla-firefox-ios) [![BuddyBuild](https://dashboard.buddybuild.com/api/statusImage?appID=57bf25c0f096bc01001e21e0&branch=master&build=latest)](https://dashboard.buddybuild.com/apps/57bf25c0f096bc01001e21e0/build/latest) [![codecov](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/master/graph/badge.svg)](https://codecov.io/gh/mozilla-mobile/firefox-ios/branch/master)
 ===============
 
 Download on the [App Store](https://itunes.apple.com/app/firefox-web-browser/id989804926).
 
-This branch
+This branch (master)
 -----------
 
-This branch is for mainline development that will ship in v7.0.
+This branch is for mainline development that will ship in *v11.0*.
 
-This branch works with Xcode 8, and supports iOS 9.x and 10.
+This branch only works with Xcode 9.2 and supports iOS 10, and 11.
+
+This branch is written in Swift 3.2.
 
 Please make sure you aim your pull requests in the right direction.
 
-For bug fixes and features for the upcoming v6.0 release, please see the *v6.x* branch.
+For bug fixes and features for the upcoming v8.0 release, please see the *v8.x* branch.
 
 Getting involved
 ----------------
@@ -24,8 +26,6 @@ We encourage you to participate in this open source project. We love Pull Reques
 * Bugs:           [File a new bug](https://bugzilla.mozilla.org/enter_bug.cgi?bug_file_loc=http%3A%2F%2F&bug_ignored=0&op_sys=iOS%20&product=Firefox%20for%20iOS&rep_platform=All) • [Existing bugs](https://bugzilla.mozilla.org/describecomponents.cgi?product=Firefox%20for%20iOS) 
 
 Want to contribute but don't know where to start? Here is a list of [Good First Bugs.](http://www.joshmatthews.net/bugsahoy/?mobileios=1&simple=1)
-
-This is a work in progress on some early ideas.  Don't get too attached to this code. Tomorrow everything will be different.
 
 Likewise, the design and UX is still in flux. Don't get attached to them. They will change tomorrow!
 https://mozilla.invisionapp.com/share/HA254M642#/screens/63057282?maintainScrollPosition=false
@@ -39,29 +39,21 @@ Building the code
 
 1. Install the latest [Xcode developer tools](https://developer.apple.com/xcode/downloads/) from Apple.
 1. Install Carthage
-
-  ```shell
-  brew update
-  brew install carthage
-  ```
-
+    ```shell
+    brew update
+    brew install carthage
+    ```
 1. Clone the repository:
-
-  ```shell
-  git clone https://github.com/mozilla-mobile/firefox-ios
-  ```
-
+    ```shell
+    git clone https://github.com/mozilla-mobile/firefox-ios
+    ```
 1. Pull in the project dependencies:
-
-  ```shell
-  cd firefox-ios
-  sh ./bootstrap.sh
-  ```
-
+    ```shell
+    cd firefox-ios
+    sh ./bootstrap.sh
+    ```
 1. Open `Client.xcodeproj` in Xcode.
 1. Build the `Fennec` scheme in Xcode.
-
-It is possible to use [App Code](https://www.jetbrains.com/objc/download/) instead of Xcode, but you will still require the Xcode developer tools.
 
 ## Contributor guidelines
 

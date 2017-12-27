@@ -10,15 +10,15 @@ import XCGLogger
 
 private let log = Logger.syncLogger
 
-typealias UploadFunction = ([Record<BookmarkBasePayload>], lastTimestamp: Timestamp?, onUpload: (POSTResult, Timestamp?) -> DeferredTimestamp) -> DeferredTimestamp
+typealias UploadFunction = ([Record<BookmarkBasePayload>], _ lastTimestamp: Timestamp?, _ onUpload: @escaping (POSTResult, Timestamp?) -> DeferredTimestamp) -> DeferredTimestamp
 
 class TrivialBookmarkStorer: BookmarkStorer {
     let uploader: UploadFunction
-    init(uploader: UploadFunction) {
+    init(uploader: @escaping UploadFunction) {
         self.uploader = uploader
     }
 
-    func applyUpstreamCompletionOp(op: UpstreamCompletionOp, itemSources: ItemSources, trackingTimesInto local: LocalOverrideCompletionOp) -> Deferred<Maybe<POSTResult>> {
+    func applyUpstreamCompletionOp(_ op: UpstreamCompletionOp, itemSources: ItemSources, trackingTimesInto local: LocalOverrideCompletionOp) -> Deferred<Maybe<POSTResult>> {
         log.debug("Uploading \(op.records.count) modified records.")
         log.debug("Uploading \(op.amendChildrenFromBuffer.count) amended buffer records.")
         log.debug("Uploading \(op.amendChildrenFromMirror.count) amended mirror records.")
@@ -26,9 +26,9 @@ class TrivialBookmarkStorer: BookmarkStorer {
 
         var records: [Record<BookmarkBasePayload>] = []
         records.reserveCapacity(op.records.count + op.amendChildrenFromBuffer.count + op.amendChildrenFromLocal.count + op.amendChildrenFromMirror.count)
-        records.appendContentsOf(op.records)
+        records.append(contentsOf: op.records)
 
-        func accumulateFromAmendMap(itemsWithNewChildren: [GUID: [GUID]], fetch: [GUID: [GUID]] -> Maybe<[GUID: BookmarkMirrorItem]>) throws /* MaybeErrorType */ {
+        func accumulateFromAmendMap(_ itemsWithNewChildren: [GUID: [GUID]], fetch: ([GUID: [GUID]]) -> Maybe<[GUID: BookmarkMirrorItem]>) throws /* MaybeErrorType */ {
             if itemsWithNewChildren.isEmpty {
                 return
             }
@@ -41,7 +41,7 @@ class TrivialBookmarkStorer: BookmarkStorer {
 
             items.forEach { (guid, item) in
                 let payload = item.asPayloadWithChildren(itemsWithNewChildren[guid])
-                let mappedGUID = payload["id"].asString ?? guid
+                let mappedGUID = payload["id"].string ?? guid
                 let record = Record<BookmarkBasePayload>(id: mappedGUID, payload: payload)
                 records.append(record)
             }
@@ -52,19 +52,19 @@ class TrivialBookmarkStorer: BookmarkStorer {
             try accumulateFromAmendMap(op.amendChildrenFromMirror, fetch: { itemSources.mirror.getMirrorItemsWithGUIDs($0.keys).value })
             try accumulateFromAmendMap(op.amendChildrenFromLocal, fetch: { itemSources.local.getLocalItemsWithGUIDs($0.keys).value })
         } catch {
-            return deferMaybe(error as! MaybeErrorType)
+            return deferMaybe(error as MaybeErrorType)
         }
 
         var success: [GUID] = []
         var failed: [GUID: String] = [:]
 
-        func onUpload(result: POSTResult, lastModified: Timestamp?) -> DeferredTimestamp {
-            success.appendContentsOf(result.success)
+        func onUpload(_ result: POSTResult, lastModified: Timestamp?) -> DeferredTimestamp {
+            success.append(contentsOf: result.success)
             result.failed.forEach { guid, message in
                 failed[guid] = message
             }
 
-            log.debug("Uploaded records got timestamp \(lastModified).")
+            log.debug("Uploaded records got timestamp \(lastModified ??? "nil").")
             let modified = lastModified ?? 0
             local.setModifiedTime(modified, guids: result.success)
             return deferMaybe(modified)
@@ -72,81 +72,221 @@ class TrivialBookmarkStorer: BookmarkStorer {
 
         // Chain the last upload timestamp right into our lastFetched timestamp.
         // This is what Sync clients tend to do, but we can probably do better.
-        return uploader(records, lastTimestamp: op.ifUnmodifiedSince, onUpload: onUpload)
+        return uploader(records, op.ifUnmodifiedSince, onUpload)
             // As if we uploaded everything in one go.
             >>> { deferMaybe(POSTResult(success: success, failed: failed)) }
     }
 }
 
+open class MalformedRecordError: MaybeErrorType, SyncPingFailureFormattable {
+    open var description: String {
+        return "Malformed record."
+    }
+    open var failureReasonName: SyncPingFailureReasonName {
+        return .otherError
+    }
+}
+
 // MARK: - External synchronizer interface.
 
-public class BufferingBookmarksSynchronizer: TimestampedSingleCollectionSynchronizer, Synchronizer {
-    public required init(scratchpad: Scratchpad, delegate: SyncDelegate, basePrefs: Prefs) {
-        super.init(scratchpad: scratchpad, delegate: delegate, basePrefs: basePrefs, collection: "bookmarks")
+open class BufferingBookmarksSynchronizer: TimestampedSingleCollectionSynchronizer, Synchronizer {
+    public required init(scratchpad: Scratchpad, delegate: SyncDelegate, basePrefs: Prefs, why: SyncReason) {
+        super.init(scratchpad: scratchpad, delegate: delegate, basePrefs: basePrefs, why: why, collection: "bookmarks")
     }
 
     override var storageVersion: Int {
         return BookmarksStorageVersion
     }
 
-    public func synchronizeBookmarksToStorage(storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>, usingBuffer buffer: protocol<BookmarkBufferStorage, BufferItemSource>, withServer storageClient: Sync15StorageClient, info: InfoCollections, greenLight: () -> Bool) -> SyncResult {
-        if let reason = self.reasonToNotSync(storageClient) {
-            return deferMaybe(.NotStarted(reason))
+    fileprivate func buildMobileRootRecord(_ local: LocalItemSource, _ buffer: BufferItemSource, additionalChildren: [BookmarkMirrorItem], deletedChildren: [GUID]) -> Deferred<Maybe<Record<BookmarkBasePayload>>> {
+        let newBookmarkGUIDs = additionalChildren.map { $0.guid }
+        return buffer.getBufferItemWithGUID(BookmarkRoots.MobileFolderGUID).bind { maybeMobileRoot in
+            // Update (or create!) the Mobile Root folder with its new children.
+            if let mobileRoot = maybeMobileRoot.successValue {
+                return buffer.getBufferChildrenGUIDsForParent(mobileRoot.guid)
+                    .map { $0.map({ (mobileRoot: mobileRoot, children: $0.filter { !deletedChildren.contains($0) } + newBookmarkGUIDs) }) }
+            } else {
+                return local.getLocalItemWithGUID(BookmarkRoots.MobileFolderGUID)
+                    .map { $0.map({ (mobileRoot: $0, children: newBookmarkGUIDs) }) }
+            }
+        } >>== { (mobileRoot: BookmarkMirrorItem, children: [GUID]) in
+            let payload = mobileRoot.asPayloadWithChildren(children)
+            guard let mappedGUID = payload["id"].string else {
+                return deferMaybe(MalformedRecordError())
+            }
+            return deferMaybe(Record<BookmarkBasePayload>(id: mappedGUID, payload: payload))
+        }
+    }
+
+    func buildMobileRootAndChildrenRecords(_ local: LocalItemSource, _ buffer: BufferItemSource, additionalChildren: [BookmarkMirrorItem], deletedChildren: [GUID]) -> Deferred<Maybe<(mobileRootRecord: Record<BookmarkBasePayload>, childrenRecords: [Record<BookmarkBasePayload>])>> {
+        let childrenRecords =
+        additionalChildren.map { bkm -> Record<BookmarkBasePayload> in
+            let payload = bkm.asPayload()
+            let mappedGUID = payload["id"].string ?? bkm.guid
+            return Record<BookmarkBasePayload>(id: mappedGUID, payload: payload)
+        } +
+        deletedChildren.map { guid -> Record<BookmarkBasePayload> in
+            let payload = BookmarkBasePayload.deletedPayload(guid)
+            let mappedGUID = payload["id"].string ?? guid
+            return Record<BookmarkBasePayload>(id: mappedGUID, payload: payload)
         }
 
-        let encoder = RecordEncoder<BookmarkBasePayload>(decode: BookmarkType.somePayloadFromJSON, encode: { $0 })
+        return self.buildMobileRootRecord(local, buffer, additionalChildren: additionalChildren, deletedChildren: deletedChildren) >>== { mobileRootRecord in
+            return deferMaybe((mobileRootRecord: mobileRootRecord, childrenRecords: childrenRecords))
+        }
+    }
+
+    func uploadSomeLocalRecords(_ storage: SyncableBookmarks & LocalItemSource & MirrorItemSource, _ mirrorer: BookmarksMirrorer, _ bookmarksClient: Sync15CollectionClient<BookmarkBasePayload>, mobileRootRecord: Record<BookmarkBasePayload>, childrenRecords: [Record<BookmarkBasePayload>]) -> Success {
+        var newBookmarkGUIDs: [GUID] = []
+        var deletedBookmarksGUIDs: [GUID] = []
+        for record in childrenRecords {
+            // No mutable l-values in Swift :(
+            if record.payload.deleted {
+                deletedBookmarksGUIDs.append(record.id)
+            } else {
+                newBookmarkGUIDs.append(record.id)
+            }
+        }
+        let records = [mobileRootRecord] + childrenRecords
+        return self.uploadRecordsSingleBatch(records, lastTimestamp: mirrorer.lastModified, storageClient: bookmarksClient) >>== { (timestamp: Timestamp, succeeded: [GUID]) -> Success in
+
+            let bufferValuesToMoveFromLocal = Set(newBookmarkGUIDs).intersection(Set(succeeded))
+            let deletedValues = Set(deletedBookmarksGUIDs).intersection(Set(succeeded))
+            let mobileRoot = (mobileRootRecord.payload as MirrorItemable).toMirrorItem(timestamp)
+            let bufferOP = BufferUpdatedCompletionOp(bufferValuesToMoveFromLocal: bufferValuesToMoveFromLocal, deletedValues: deletedValues, mobileRoot: mobileRoot, modifiedTime: timestamp)
+            return storage.applyBufferUpdatedCompletionOp(bufferOP) >>> {
+                mirrorer.advanceNextDownloadTimestampTo(timestamp: timestamp) // We need to advance our batching downloader timestamp to match. See Bug 1253458.
+                return succeed()
+            }
+        }
+    }
+
+    open func synchronizeBookmarksToStorage(_ storage: SyncableBookmarks & LocalItemSource & MirrorItemSource, usingBuffer buffer: BookmarkBufferStorage & BufferItemSource, withServer storageClient: Sync15StorageClient, info: InfoCollections, greenLight: @escaping () -> Bool, remoteClientsAndTabs: RemoteClientsAndTabs) -> SyncResult {
+        if self.prefs.boolForKey("dateAddedMigrationDone") != true {
+            self.lastFetched = 0
+            self.prefs.setBool(true, forKey: "dateAddedMigrationDone")
+        }
+
+        if let reason = self.reasonToNotSync(storageClient) {
+            return deferMaybe(.notStarted(reason))
+        }
+
+        let encoder = RecordEncoder<BookmarkBasePayload>(decode: BookmarkType.somePayloadFromJSON, encode: { $0.json })
 
         guard let bookmarksClient = self.collectionClient(encoder, storageClient: storageClient) else {
             log.error("Couldn't make bookmarks factory.")
             return deferMaybe(FatalError(message: "Couldn't make bookmarks factory."))
         }
 
-        let start = NSDate.nowMicroseconds()
-        let mirrorer = BookmarksMirrorer(storage: buffer, client: bookmarksClient, basePrefs: self.prefs, collection: "bookmarks")
+        let start = Date.nowMicroseconds()
+        let mirrorer = BookmarksMirrorer(storage: buffer, client: bookmarksClient, basePrefs: self.prefs, collection: "bookmarks", statsSession: self.statsSession)
         let storer = TrivialBookmarkStorer(uploader: { records, lastTimestamp, onUpload in
             let timestamp = lastTimestamp ?? self.lastFetched
             return self.uploadRecords(records, lastTimestamp: timestamp, storageClient: bookmarksClient, onUpload: onUpload)
               >>== effect { timestamp in
                 // We need to advance our batching downloader timestamp to match. See Bug 1253458.
                 self.setTimestamp(timestamp)
-                mirrorer.advanceNextDownloadTimestampTo(timestamp)
+                mirrorer.advanceNextDownloadTimestampTo(timestamp: timestamp)
             }
         })
 
-        let doMirror = mirrorer.go(info, greenLight: greenLight)
-
+        statsSession.start()
+        
+        let doMirror = mirrorer.go(info: info, greenLight: greenLight)
         let run: SyncResult
+
         if !AppConstants.shouldMergeBookmarks {
-            if case .Release = AppConstants.BuildChannel {
-                // On release, just mirror; don't validate.
-                run = doMirror
-            } else {
-                run = doMirror >>== effect({ result in
-                    // Just validate to report statistics.
-                    if case .Completed = result {
-                        log.debug("Validating completed buffer download.")
-                        buffer.validate()
+            run = doMirror >>== { result -> SyncResult in
+                // Validate the buffer to report statistics.
+                if case .completed = result {
+                    log.debug("Validating completed buffer download.")
+                    return buffer.validate().bind { validationResult in
+                        guard let invalidError = validationResult.failureValue as? BufferInvalidError else {
+                            return deferMaybe(result)
+                        }
+                        return buffer.getUpstreamRecordCount().bind { checked -> Success in
+                            self.statsSession.validationStats = self.validationStatsFrom(error: invalidError, checked: checked)
+                            return self.maybeStartRepairProcedure(greenLight: greenLight, error: invalidError, remoteClientsAndTabs: remoteClientsAndTabs)
+                        } >>> {
+                            return deferMaybe(result)
+                        }
                     }
-                })
+                }
+                return deferMaybe(result)
+            } >>== { result in
+                guard AppConstants.MOZ_SIMPLE_BOOKMARKS_SYNCING else {
+                    return deferMaybe(result)
+                }
+                guard case .completed = result else {
+                    return deferMaybe(result)
+                }
+
+                // -1 because we also need to upload the mobile root.
+                return (storage.getLocalBookmarksModifications(limit: bookmarksClient.maxBatchPostRecords - 1) >>== { (deletedGUIDs, newBookmarks) -> Success in
+                    guard newBookmarks.count > 0 || deletedGUIDs.count > 0 else {
+                        return succeed()
+                    }
+                    return self.buildMobileRootAndChildrenRecords(storage, buffer, additionalChildren: newBookmarks, deletedChildren: deletedGUIDs) >>== { (mobileRootRecord, childrenRecords) in
+                        return self.uploadSomeLocalRecords(storage, mirrorer, bookmarksClient, mobileRootRecord: mobileRootRecord, childrenRecords: childrenRecords)
+                    }
+                }).bind { simpleSyncingResult in
+                    if let failure = simpleSyncingResult.failureValue {
+                        let description = failure is RecordTooLargeError ? "Record too large" : failure.description
+                        Sentry.shared.send(message: "Failed to simple sync bookmarks", tag: SentryTag.bookmarks, severity: .error, description: description)
+                    }
+                    return deferMaybe(result)
+                }
             }
         } else {
             run = doMirror >>== { result in
                 // Only bother trying to sync if the mirror operation wasn't interrupted or partial.
-                if case .Completed = result {
-                    let applier = MergeApplier(buffer: buffer, storage: storage, client: storer, greenLight: greenLight)
-                    return applier.go()
+                if case .completed = result {
+                    return buffer.validate().bind { result in
+                        if let invalidError = result.failureValue as? BufferInvalidError {
+                            return buffer.getUpstreamRecordCount().bind { checked in
+                                self.statsSession.validationStats = self.validationStatsFrom(error: invalidError, checked: checked)
+                                return self.maybeStartRepairProcedure(greenLight: greenLight, error: invalidError, remoteClientsAndTabs: remoteClientsAndTabs) >>> {
+                                    return deferMaybe(invalidError)
+                                }
+                            }
+                        }
+                        
+                        let applier = MergeApplier(buffer: buffer, storage: storage, client: storer, statsSession: self.statsSession, greenLight: greenLight)
+                        return applier.go()
+                    }
                 }
                 return deferMaybe(result)
             }
         }
 
         run.upon { result in
-            let end = NSDate.nowMicroseconds()
+            let end = Date.nowMicroseconds()
             let duration = end - start
             log.info("Bookmark \(AppConstants.shouldMergeBookmarks ? "sync" : "mirroring") took \(duration)µs. Result was \(result.successValue?.description ?? result.failureValue?.description ?? "failure")")
         }
 
         return run
+    }
+
+    private func validationStatsFrom(error: BufferInvalidError, checked: Int?) -> ValidationStats {
+        let problems = error.inconsistencies.map { ValidationProblem(name: $0.trackingEvent, count: $1.count) }
+        return ValidationStats(problems: problems, took: error.validationDuration, checked: checked)
+    }
+
+    private func maybeStartRepairProcedure(greenLight: () -> Bool, error: BufferInvalidError, remoteClientsAndTabs: RemoteClientsAndTabs) -> Success {
+        guard AppConstants.MOZ_BOOKMARKS_REPAIR_REQUEST && greenLight() else {
+            return succeed()
+        }
+        log.warning("Buffer inconsistent, starting repair procedure")
+        let repairer = BookmarksRepairRequestor(scratchpad: self.scratchpad, basePrefs: self.basePrefs, remoteClients: remoteClientsAndTabs)
+        return repairer.startRepairs(validationInfo: error.inconsistencies).bind { result in
+            if let repairFailure = result.failureValue {
+                Sentry.shared.send(message: "Bookmarks repair failure", tag: SentryTag.bookmarks, severity: .error, description: repairFailure.description)
+            } else {
+                Sentry.shared.send(message: "Bookmarks repair succeeded", tag: SentryTag.bookmarks, severity: .debug)
+            }
+            return succeed()
+        }
     }
 }
 
@@ -156,29 +296,31 @@ class MergeApplier {
     let storage: SyncableBookmarks
     let client: BookmarkStorer
     let merger: BookmarksStorageMerger
+    let statsSession: SyncEngineStatsSession
 
-    init(buffer: protocol<BookmarkBufferStorage, BufferItemSource>, storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>, client: BookmarkStorer, greenLight: () -> Bool) {
+    init(buffer: BookmarkBufferStorage & BufferItemSource, storage: SyncableBookmarks & LocalItemSource & MirrorItemSource, client: BookmarkStorer, statsSession: SyncEngineStatsSession, greenLight: @escaping () -> Bool) {
         self.greenLight = greenLight
         self.buffer = buffer
         self.storage = storage
         self.merger = ThreeWayBookmarksStorageMerger(buffer: buffer, storage: storage)
         self.client = client
+        self.statsSession = statsSession
     }
 
     // Exposed for use from tests.
-    func applyResult(result: BookmarksMergeResult) -> Success {
+    func applyResult(_ result: BookmarksMergeResult) -> Success {
         return result.applyToClient(self.client, storage: self.storage, buffer: self.buffer)
     }
 
     func go() -> SyncResult {
         guard self.greenLight() else {
             log.info("Green light turned red; not merging bookmarks.")
-            return deferMaybe(SyncStatus.Completed)
+            return deferMaybe(SyncStatus.completed(statsSession.end()))
         }
 
         return self.merger.merge()
           >>== self.applyResult
-           >>> always(SyncStatus.Completed)
+           >>> always(SyncStatus.completed(statsSession.end()))
     }
 }
 
@@ -238,15 +380,15 @@ class MergeApplier {
  * racing. Later!
  */
 protocol BookmarksStorageMerger: class {
-    init(buffer: protocol<BookmarkBufferStorage, BufferItemSource>, storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>)
+    init(buffer: BookmarkBufferStorage & BufferItemSource, storage: SyncableBookmarks & LocalItemSource & MirrorItemSource)
     func merge() -> Deferred<Maybe<BookmarksMergeResult>>
 }
 
 class NoOpBookmarksMerger: BookmarksStorageMerger {
-    let buffer: protocol<BookmarkBufferStorage, BufferItemSource>
-    let storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>
+    let buffer: BookmarkBufferStorage & BufferItemSource
+    let storage: SyncableBookmarks & LocalItemSource & MirrorItemSource
 
-    required init(buffer: protocol<BookmarkBufferStorage, BufferItemSource>, storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>) {
+    required init(buffer: BookmarkBufferStorage & BufferItemSource, storage: SyncableBookmarks & LocalItemSource & MirrorItemSource) {
         self.buffer = buffer
         self.storage = storage
     }
@@ -257,10 +399,10 @@ class NoOpBookmarksMerger: BookmarksStorageMerger {
 }
 
 class ThreeWayBookmarksStorageMerger: BookmarksStorageMerger {
-    let buffer: protocol<BookmarkBufferStorage, BufferItemSource>
-    let storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>
+    let buffer: BookmarkBufferStorage & BufferItemSource
+    let storage: SyncableBookmarks & LocalItemSource & MirrorItemSource
 
-    required init(buffer: protocol<BookmarkBufferStorage, BufferItemSource>, storage: protocol<SyncableBookmarks, LocalItemSource, MirrorItemSource>) {
+    required init(buffer: BookmarkBufferStorage & BufferItemSource, storage: SyncableBookmarks & LocalItemSource & MirrorItemSource) {
         self.buffer = buffer
         self.storage = storage
     }
@@ -268,7 +410,7 @@ class ThreeWayBookmarksStorageMerger: BookmarksStorageMerger {
     // MARK: - BookmarksStorageMerger.
 
     // Trivial one-way sync.
-    private func applyLocalDirectlyToMirror() -> Deferred<Maybe<BookmarksMergeResult>> {
+    fileprivate func applyLocalDirectlyToMirror() -> Deferred<Maybe<BookmarksMergeResult>> {
         // Theoretically, we do the following:
         // * Construct a virtual bookmark tree overlaying local on the mirror.
         // * Walk the tree to produce Sync records.
@@ -301,7 +443,7 @@ class ThreeWayBookmarksStorageMerger: BookmarksStorageMerger {
         return self.threeWayMerge()
     }
 
-    private func applyIncomingDirectlyToMirror() -> Deferred<Maybe<BookmarksMergeResult>> {
+    fileprivate func applyIncomingDirectlyToMirror() -> Deferred<Maybe<BookmarksMergeResult>> {
         // If the incoming buffer is consistent -- and the result of the mirrorer
         // gives us a hint about that! -- then we can move the buffer records into
         // the mirror directly.

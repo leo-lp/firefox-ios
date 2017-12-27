@@ -10,8 +10,8 @@ import XCTest
 
 class MockFiles: FileAccessor {
     init() {
-        let docPath = NSSearchPathForDirectoriesInDomains(NSSearchPathDirectory.DocumentDirectory, NSSearchPathDomainMask.UserDomainMask, true)[0]
-        super.init(rootPath: (docPath as NSString).stringByAppendingPathComponent("testing"))
+        let docPath = NSSearchPathForDirectoriesInDomains(FileManager.SearchPathDirectory.documentDirectory, FileManager.SearchPathDomainMask.userDomainMask, true)[0]
+        super.init(rootPath: (docPath as NSString).appendingPathComponent("testing"))
     }
 }
 
@@ -19,10 +19,10 @@ class MockFiles: FileAccessor {
 let threeMonthsInMillis: UInt64 = 3 * 30 * 24 * 60 * 60 * 1000
 let threeMonthsInMicros: UInt64 = UInt64(threeMonthsInMillis) * UInt64(1000)
 
-let baseInstantInMillis = NSDate.now() - threeMonthsInMillis
-let baseInstantInMicros = NSDate.nowMicroseconds() - threeMonthsInMicros
+let baseInstantInMillis = Date.now() - threeMonthsInMillis
+let baseInstantInMicros = Date.nowMicroseconds() - threeMonthsInMicros
 
-func advanceMicrosecondTimestamp(timestamp: MicrosecondTimestamp, by: Int) -> MicrosecondTimestamp {
+func advanceMicrosecondTimestamp(_ timestamp: MicrosecondTimestamp, by: Int) -> MicrosecondTimestamp {
     return timestamp + UInt64(by)
 }
 
@@ -35,18 +35,18 @@ extension Site {
 class TestSQLiteHistoryFrecencyPerf: XCTestCase {
     func testFrecencyPerf() {
         let files = MockFiles()
-        let db = BrowserDB(filename: "browser.db", files: files)
+        let db = BrowserDB(filename: "browser.db", schema: BrowserSchema(), files: files)
         let prefs = MockProfilePrefs()
         let history = SQLiteHistory(db: db, prefs: prefs)
 
         let count = 500
 
-        history.clearHistory().value
+        history.clearHistory().succeeded()
         populateHistoryForFrecencyCalculations(history, siteCount: count)
 
         self.measureMetrics([XCTPerformanceMetric_WallClockTime], automaticallyStartMeasuring: true) {
             for _ in 0...5 {
-                history.getSitesByFrecencyWithHistoryLimit(10, includeIcon: false).value
+                history.getSitesByFrecencyWithHistoryLimit(10, includeIcon: false).succeeded()
             }
             self.stopMeasuring()
         }
@@ -56,18 +56,18 @@ class TestSQLiteHistoryFrecencyPerf: XCTestCase {
 class TestSQLiteHistoryTopSitesCachePref: XCTestCase {
     func testCachePerf() {
         let files = MockFiles()
-        let db = BrowserDB(filename: "browser.db", files: files)
+        let db = BrowserDB(filename: "browser.db", schema: BrowserSchema(), files: files)
         let prefs = MockProfilePrefs()
         let history = SQLiteHistory(db: db, prefs: prefs)
 
         let count = 500
 
-        history.clearHistory().value
+        history.clearHistory().succeeded()
         populateHistoryForFrecencyCalculations(history, siteCount: count)
 
         history.setTopSitesNeedsInvalidation()
         self.measureMetrics([XCTPerformanceMetric_WallClockTime], automaticallyStartMeasuring: true) {
-            history.updateTopSitesCacheIfInvalidated().value
+            history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
             self.stopMeasuring()
         }
     }
@@ -76,32 +76,32 @@ class TestSQLiteHistoryTopSitesCachePref: XCTestCase {
 // MARK - Private Test Helper Methods
 
 private enum VisitOrigin {
-    case Local
-    case Remote
+    case local
+    case remote
 }
 
-private func populateHistoryForFrecencyCalculations(history: SQLiteHistory, siteCount count: Int) {
+private func populateHistoryForFrecencyCalculations(_ history: SQLiteHistory, siteCount count: Int) {
     for i in 0...count {
         let site = Site(url: "http://s\(i)ite\(i)/foo", title: "A \(i)")
         site.guid = "abc\(i)def"
 
         let baseMillis: UInt64 = baseInstantInMillis - 20000
-        history.insertOrUpdatePlace(site.asPlace(), modified: baseMillis).value
+        history.insertOrUpdatePlace(site.asPlace(), modified: baseMillis).succeeded()
 
         for j in 0...20 {
             let visitTime = advanceMicrosecondTimestamp(baseInstantInMicros, by: (1000000 * i) + (1000 * j))
-            addVisitForSite(site, intoHistory: history, from: .Local, atTime: visitTime)
-            addVisitForSite(site, intoHistory: history, from: .Remote, atTime: visitTime)
+            addVisitForSite(site, intoHistory: history, from: .local, atTime: visitTime)
+            addVisitForSite(site, intoHistory: history, from: .remote, atTime: visitTime)
         }
     }
 }
 
-private func addVisitForSite(site: Site, intoHistory history: SQLiteHistory, from: VisitOrigin, atTime: MicrosecondTimestamp) {
-    let visit = SiteVisit(site: site, date: atTime, type: VisitType.Link)
+private func addVisitForSite(_ site: Site, intoHistory history: SQLiteHistory, from: VisitOrigin, atTime: MicrosecondTimestamp) {
+    let visit = SiteVisit(site: site, date: atTime, type: VisitType.link)
     switch from {
-    case .Local:
-        history.addLocalVisit(visit).value
-    case .Remote:
-        history.storeRemoteVisits([visit], forGUID: site.guid!).value
+    case .local:
+        history.addLocalVisit(visit).succeeded()
+    case .remote:
+        history.storeRemoteVisits([visit], forGUID: site.guid!).succeeded()
     }
 }

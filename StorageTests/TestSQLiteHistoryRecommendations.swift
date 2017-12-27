@@ -6,6 +6,7 @@ import Foundation
 import Shared
 @testable import Storage
 import Deferred
+import SDWebImage
 
 import XCTest
 
@@ -16,6 +17,34 @@ private let oneDayInMicroseconds: UInt64 = 24 * oneHourInMicroseconds
 class TestSQLiteHistoryRecommendations: XCTestCase {
     let files = MockFiles()
 
+    var db: BrowserDB!
+    var prefs: MockProfilePrefs!
+    var history: SQLiteHistory!
+    var bookmarks: MergedSQLiteBookmarks!
+    var metadata: SQLiteMetadata!
+
+    override func setUp() {
+        super.setUp()
+
+        db = BrowserDB(filename: "browser.db", schema: BrowserSchema(), files: files)
+        metadata = SQLiteMetadata(db: db)
+        prefs = MockProfilePrefs()
+        history = SQLiteHistory(db: db, prefs: prefs)
+        bookmarks = MergedSQLiteBookmarks(db: db)
+    }
+
+    override func tearDown() {
+        // Clear out anything we might have changed on disk
+        history.clearHistory().succeeded()
+        db.run("DELETE FROM \(TablePageMetadata)").succeeded()
+        db.run("DELETE FROM \(TableHighlights)").succeeded()
+        db.run("DELETE FROM \(TableActivityStreamBlocklist)").succeeded()
+
+        SDWebImageManager.shared().imageCache?.clearDisk()
+        SDWebImageManager.shared().imageCache?.clearMemory()
+
+        super.tearDown()
+    }
 
     /*
      * Verify that we return a non-recent history highlight if:
@@ -26,11 +55,7 @@ class TestSQLiteHistoryRecommendations: XCTestCase {
      *
      */
     func testHistoryHighlights() {
-        let db = BrowserDB(filename: "browser.db", files: files)
-        let prefs = MockProfilePrefs()
-        let history = SQLiteHistory(db: db, prefs: prefs)
-
-        let startTime = NSDate.nowMicroseconds()
+        let startTime = Date.nowMicroseconds()
         let oneHourAgo = startTime - oneHourInMicroseconds
         let fifteenMinutesAgo = startTime - 15 * microsecondsPerMinute
 
@@ -45,17 +70,70 @@ class TestSQLiteHistoryRecommendations: XCTestCase {
         let siteC = Site(url: "http://siteC/", title: "C")
         let siteD = Site(url: "http://siteD/", title: "D")
 
-        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .Link)
-        let siteVisitB1 = SiteVisit(site: siteB, date: fifteenMinutesAgo, type: .Link)
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
+        let siteVisitB1 = SiteVisit(site: siteB, date: fifteenMinutesAgo, type: .link)
 
-        let siteVisitC1 = SiteVisit(site: siteC, date: oneHourAgo, type: .Link)
-        let siteVisitC2 = SiteVisit(site: siteC, date: oneHourAgo + 1000, type: .Link)
-        let siteVisitC3 = SiteVisit(site: siteC, date: oneHourAgo + 2000, type: .Link)
+        let siteVisitC1 = SiteVisit(site: siteC, date: oneHourAgo + 1, type: .link)
+        let siteVisitC2 = SiteVisit(site: siteC, date: oneHourAgo + 1000, type: .link)
+        let siteVisitC3 = SiteVisit(site: siteC, date: oneHourAgo + 2000, type: .link)
         
-        let siteVisitD1 = SiteVisit(site: siteD, date: oneHourAgo, type: .Link)
-        let siteVisitD2 = SiteVisit(site: siteD, date: oneHourAgo + 1000, type: .Link)
-        let siteVisitD3 = SiteVisit(site: siteD, date: oneHourAgo + 2000, type: .Link)
-        let siteVisitD4 = SiteVisit(site: siteD, date: oneHourAgo + 3000, type: .Link)
+        let siteVisitD1 = SiteVisit(site: siteD, date: oneHourAgo, type: .link)
+        let siteVisitD2 = SiteVisit(site: siteD, date: oneHourAgo + 1000, type: .link)
+        let siteVisitD3 = SiteVisit(site: siteD, date: oneHourAgo + 2000, type: .link)
+        let siteVisitD4 = SiteVisit(site: siteD, date: oneHourAgo + 3000, type: .link)
+
+        history.clearHistory().succeeded()
+        history.addLocalVisit(siteVisitA1).succeeded()
+
+        history.addLocalVisit(siteVisitB1).succeeded()
+
+        history.addLocalVisit(siteVisitC1).succeeded()
+        history.addLocalVisit(siteVisitC2).succeeded()
+        history.addLocalVisit(siteVisitC3).succeeded()
+
+        history.addLocalVisit(siteVisitD1).succeeded()
+        history.addLocalVisit(siteVisitD2).succeeded()
+        history.addLocalVisit(siteVisitD3).succeeded()
+        history.addLocalVisit(siteVisitD4).succeeded()
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
+        let highlights = history.getHighlights().value.successValue!
+        XCTAssertEqual(highlights.count, 2)
+        XCTAssertEqual(highlights[0]!.title, "A")
+        XCTAssertEqual(highlights[1]!.title, "C")
+    }
+
+    /*
+     * Verify that we do not return a highlight if
+     * its domain is in the blacklist
+     *
+     */
+    func testBlacklistHighlights() {
+        let startTime = Date.nowMicroseconds()
+        let oneHourAgo = startTime - oneHourInMicroseconds
+        let fifteenMinutesAgo = startTime - 15 * microsecondsPerMinute
+
+        /*
+         * Site A: 1 visit, 1 hour ago = highlight that is on the blacklist
+         * Site B: 1 visits, 15 minutes ago = non-highlight
+         * Site C: 3 visits, 1 hour ago = highlight that is on the blacklist
+         * Site D: 4 visits, 1 hour ago = non-highlight
+         */
+        let siteA = Site(url: "http://www.google.com", title: "A")
+        let siteB = Site(url: "http://siteB/", title: "B")
+        let siteC = Site(url: "http://www.search.yahoo.com/", title: "C")
+        let siteD = Site(url: "http://siteD/", title: "D")
+
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
+        let siteVisitB1 = SiteVisit(site: siteB, date: fifteenMinutesAgo, type: .link)
+
+        let siteVisitC1 = SiteVisit(site: siteC, date: oneHourAgo, type: .link)
+        let siteVisitC2 = SiteVisit(site: siteC, date: oneHourAgo + 1000, type: .link)
+        let siteVisitC3 = SiteVisit(site: siteC, date: oneHourAgo + 2000, type: .link)
+
+        let siteVisitD1 = SiteVisit(site: siteD, date: oneHourAgo, type: .link)
+        let siteVisitD2 = SiteVisit(site: siteD, date: oneHourAgo + 1000, type: .link)
+        let siteVisitD3 = SiteVisit(site: siteD, date: oneHourAgo + 2000, type: .link)
+        let siteVisitD4 = SiteVisit(site: siteD, date: oneHourAgo + 3000, type: .link)
 
         history.clearHistory().succeeded()
         history.addLocalVisit(siteVisitA1).succeeded()
@@ -71,124 +149,185 @@ class TestSQLiteHistoryRecommendations: XCTestCase {
         history.addLocalVisit(siteVisitD3).succeeded()
         history.addLocalVisit(siteVisitD4).succeeded()
 
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
         let highlights = history.getHighlights().value.successValue!
-        XCTAssertEqual(highlights.count, 2)
-        XCTAssertEqual(highlights[0]!.title, "A")
-        XCTAssertEqual(highlights[1]!.title, "C")
+        XCTAssertEqual(highlights.count, 0)
     }
 
     /*
-     * Verify that we return a bookmark highlight if:
-     * 
-     * 1. Bookmark was last modified less than 3 days ago
-     * 2. Bookmark has been visited at least 3 times
-     * 3. Bookmark has a non-empty title
-     *
+     * Verify that we return the most recent highlight per domain
      */
-    func testBookmarkHighlights() {
-        let db = BrowserDB(filename: "browser.db", files: files)
-        let prefs = MockProfilePrefs()
-        let history = SQLiteHistory(db: db, prefs: prefs)
-        let bookmarks = SQLiteBookmarkBufferStorage(db: db)
-
-        let startTime = NSDate.nowMicroseconds()
+    func testMostRecentUniqueDomainReturnedInHighlights() {
+        let startTime = Date.nowMicroseconds()
         let oneHourAgo = startTime - oneHourInMicroseconds
-        let fourDaysAgo = startTime - 4 * oneDayInMicroseconds
+        let twoHoursAgo = startTime - 2 * oneHourInMicroseconds
 
-        let bookmarkA = BookmarkMirrorItem.bookmark("A", modified: oneHourAgo, hasDupe: false,
-                                                    parentID: BookmarkRoots.MenuFolderGUID,
-                                                    parentName: "Menu Bookmarks",
-                                                    title: "A Bookmark", description: nil,
-                                                    URI: "http://bookmarkA/", tags: "", keyword: nil)
+        /*
+         * Site A: 1 visit, 1 hour ago = highlight
+         * Site C: 2 visits, 2 hours ago = highlight with the same domain
+         */
+        let siteA = Site(url: "http://www.foo.com/", title: "A")
+        let siteC = Site(url: "http://m.foo.com/", title: "C")
 
-        let bookmarkB = BookmarkMirrorItem.bookmark("B", modified: fourDaysAgo, hasDupe: false,
-                                                    parentID: BookmarkRoots.MenuFolderGUID,
-                                                    parentName: "Menu Bookmarks",
-                                                    title: "B Bookmark", description: nil,
-                                                    URI: "http://bookmarkB/", tags: "", keyword: nil)
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
 
-        bookmarks.applyRecords([bookmarkA, bookmarkB]).succeeded()
-
-        let bookmarkSiteA = Site(url: "http://bookmarkA/", title: "A Bookmark")
-        let bookmarkVisitA1 = SiteVisit(site: bookmarkSiteA, date: oneHourAgo, type: .Bookmark)
-        let bookmarkVisitA2 = SiteVisit(site: bookmarkSiteA, date: oneHourAgo + 1000, type: .Bookmark)
-        let bookmarkVisitA3 = SiteVisit(site: bookmarkSiteA, date: oneHourAgo + 2000, type: .Bookmark)
-        
-        let bookmarkSiteB = Site(url: "http://bookmarkB/", title: "B Bookmark")
-        let bookmarkVisitB1 = SiteVisit(site: bookmarkSiteB, date: fourDaysAgo, type: .Bookmark)
-        let bookmarkVisitB2 = SiteVisit(site: bookmarkSiteB, date: fourDaysAgo + 1000, type: .Bookmark)
-        let bookmarkVisitB3 = SiteVisit(site: bookmarkSiteB, date: fourDaysAgo + 2000, type: .Bookmark)
-        let bookmarkVisitB4 = SiteVisit(site: bookmarkSiteB, date: fourDaysAgo + 3000, type: .Bookmark)
+        let siteVisitC1 = SiteVisit(site: siteC, date: twoHoursAgo, type: .link)
+        let siteVisitC2 = SiteVisit(site: siteC, date: twoHoursAgo + 1000, type: .link)
 
         history.clearHistory().succeeded()
-        history.addLocalVisit(bookmarkVisitA1).succeeded()
-        history.addLocalVisit(bookmarkVisitA2).succeeded()
-        history.addLocalVisit(bookmarkVisitA3).succeeded()
+        history.addLocalVisit(siteVisitA1).succeeded()
 
-        history.addLocalVisit(bookmarkVisitB1).succeeded()
-        history.addLocalVisit(bookmarkVisitB2).succeeded()
-        history.addLocalVisit(bookmarkVisitB3).succeeded()
-        history.addLocalVisit(bookmarkVisitB4).succeeded()
+        history.addLocalVisit(siteVisitC1).succeeded()
+        history.addLocalVisit(siteVisitC2).succeeded()
 
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
         let highlights = history.getHighlights().value.successValue!
         XCTAssertEqual(highlights.count, 1)
-        XCTAssertEqual(highlights[0]!.title, "A Bookmark")
+        XCTAssertEqual(highlights[0]!.title, "A")
+    }
+
+    func testBookmarkHighlights() {
+        history.clearHistory().succeeded()
+        populateForRecommendationCalculations(history, bookmarks: bookmarks, metadata: metadata, historyCount: 10, bookmarkCount: 10)
+
+        let sites = history.getRecentBookmarks(5).value.successValue?.asArray()
+        XCTAssertEqual(sites!.count, 5, "5 bookmarks should have been fetched")
+        sites!.forEach { XCTAssertEqual($0.guid, "bookmark-\(sites!.index(of: $0)!)"); XCTAssertEqual($0.metadata?.description, "Test Description") }
+    }
+
+    func testMetadataReturnedInHighlights() {
+        let startTime = Date.nowMicroseconds()
+        let oneHourAgo = startTime - oneHourInMicroseconds
+
+        let siteA = Site(url: "http://siteA.com", title: "Site A")
+        let siteB = Site(url: "http://siteB.com/", title: "Site B")
+        let siteC = Site(url: "http://siteC.com/", title: "Site C")
+
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
+        let siteVisitB1 = SiteVisit(site: siteB, date: oneHourAgo + 1000, type: .link)
+
+        let siteVisitC1 = SiteVisit(site: siteC, date: oneHourAgo, type: .link)
+        let siteVisitC2 = SiteVisit(site: siteC, date: oneHourAgo + 1000, type: .link)
+        let siteVisitC3 = SiteVisit(site: siteC, date: oneHourAgo + 2000, type: .link)
+
+        history.clearHistory().succeeded()
+        history.addLocalVisit(siteVisitA1).succeeded()
+
+        history.addLocalVisit(siteVisitB1).succeeded()
+
+        history.addLocalVisit(siteVisitC1).succeeded()
+        history.addLocalVisit(siteVisitC2).succeeded()
+        history.addLocalVisit(siteVisitC3).succeeded()
+
+        // add metadata for 2 of the sites
+        let metadata = SQLiteMetadata(db: db)
+        let pageA = PageMetadata(id: nil, siteURL: siteA.url, mediaURL: "http://image.com",
+                                title: siteA.title, description: "Test Description", type: nil, providerName: nil, mediaDataURI: nil, cacheImages: false)
+        metadata.storeMetadata(pageA, forPageURL: siteA.url.asURL!, expireAt: Date.now() + 3000).succeeded()
+        let pageB = PageMetadata(id: nil, siteURL: siteB.url, mediaURL: "http://image.com",
+                                 title: siteB.title, description: "Test Description", type: nil, providerName: nil, mediaDataURI: nil, cacheImages: false)
+        metadata.storeMetadata(pageB, forPageURL: siteB.url.asURL!, expireAt: Date.now() + 3000).succeeded()
+        let pageC = PageMetadata(id: nil, siteURL: siteC.url, mediaURL: "http://image.com",
+                                 title: siteC.title, description: "Test Description", type: nil, providerName: nil, mediaDataURI: nil, cacheImages: false)
+        metadata.storeMetadata(pageC, forPageURL: siteC.url.asURL!, expireAt: Date.now() + 3000).succeeded()
+
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
+        let highlights = history.getHighlights().value.successValue!
+        XCTAssertEqual(highlights.count, 3)
+
+        for highlight in highlights {
+            XCTAssertNotNil(highlight?.metadata)
+            XCTAssertNotNil(highlight?.metadata?.mediaURL)
+        }
+    }
+
+    func testRemoveHighlightForURL() {
+        let startTime = Date.nowMicroseconds()
+        let oneHourAgo = startTime - oneHourInMicroseconds
+
+        let siteA = Site(url: "http://siteA/", title: "A")
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
+
+        history.clearHistory().succeeded()
+        history.addLocalVisit(siteVisitA1).succeeded()
+
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
+        var highlights = history.getHighlights().value.successValue!
+        XCTAssertEqual(highlights.count, 1)
+        XCTAssertEqual(highlights[0]!.title, "A")
+
+        history.removeHighlightForURL(siteA.url).succeeded()
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
+        highlights = history.getHighlights().value.successValue!
+        XCTAssertEqual(highlights.count, 0)
+    }
+
+    func testClearHighlightsCache() {
+        let startTime = Date.nowMicroseconds()
+        let oneHourAgo = startTime - oneHourInMicroseconds
+
+        let siteA = Site(url: "http://siteA/", title: "A")
+        let siteVisitA1 = SiteVisit(site: siteA, date: oneHourAgo, type: .link)
+
+        history.clearHistory().succeeded()
+        history.addLocalVisit(siteVisitA1).succeeded()
+
+        history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
+        let highlights = history.getHighlights().value.successValue!
+        XCTAssertEqual(highlights.count, 1)
+        XCTAssertEqual(highlights[0]!.title, "A")
     }
 }
 
 class TestSQLiteHistoryRecommendationsPerf: XCTestCase {
     func testRecommendationPref() {
         let files = MockFiles()
-        let db = BrowserDB(filename: "browser.db", files: files)
+        let db = BrowserDB(filename: "browser.db", schema: BrowserSchema(), files: files)
+        let metadata = SQLiteMetadata(db: db)
         let prefs = MockProfilePrefs()
         let history = SQLiteHistory(db: db, prefs: prefs)
-        let bookmarks = SQLiteBookmarkBufferStorage(db: db)
+        let bookmarks = MergedSQLiteBookmarks(db: db)
 
         let count = 500
 
-        history.clearHistory().value
-        populateForRecommendationCalculations(history, bookmarks: bookmarks, historyCount: count, bookmarkCount: count)
+        history.clearHistory().succeeded()
+        populateForRecommendationCalculations(history, bookmarks: bookmarks, metadata: metadata, historyCount: count, bookmarkCount: count)
         self.measureMetrics([XCTPerformanceMetric_WallClockTime], automaticallyStartMeasuring: true) {
             for _ in 0...5 {
-                history.getHighlights().value
+                history.repopulate(invalidateTopSites: true, invalidateHighlights: true).succeeded()
             }
             self.stopMeasuring()
         }
     }
 }
 
-private func populateForRecommendationCalculations(history: SQLiteHistory, bookmarks: SQLiteBookmarkBufferStorage, historyCount: Int, bookmarkCount: Int) {
+private func populateForRecommendationCalculations(_ history: SQLiteHistory, bookmarks: MergedSQLiteBookmarks, metadata: SQLiteMetadata, historyCount: Int, bookmarkCount: Int) {
     let baseMillis: UInt64 = baseInstantInMillis - 20000
 
     for i in 0..<historyCount {
         let site = Site(url: "http://s\(i)ite\(i)/foo", title: "A \(i)")
         site.guid = "abc\(i)def"
 
-        history.insertOrUpdatePlace(site.asPlace(), modified: baseMillis).value
-
+        history.insertOrUpdatePlace(site.asPlace(), modified: baseMillis).succeeded()
         for j in 0...20 {
             let visitTime = advanceMicrosecondTimestamp(baseInstantInMicros, by: (1000000 * i) + (1000 * j))
-            addVisitForSite(site, intoHistory: history, from: .Local, atTime: visitTime)
-            addVisitForSite(site, intoHistory: history, from: .Remote, atTime: visitTime)
+            addVisitForSite(site, intoHistory: history, from: .local, atTime: visitTime)
+            addVisitForSite(site, intoHistory: history, from: .remote, atTime: visitTime)
         }
     }
 
-    let bookmarkItems: [BookmarkMirrorItem] = (0..<bookmarkCount).map { i in
+    (0..<bookmarkCount).forEach { i in
         let modifiedTime = advanceMicrosecondTimestamp(baseInstantInMicros, by: (1000000 * i))
         let bookmarkSite = Site(url: "http://bookmark-\(i)/", title: "\(i) Bookmark")
         bookmarkSite.guid = "bookmark-\(i)"
         
-        addVisitForSite(bookmarkSite, intoHistory: history, from: .Local, atTime: modifiedTime)
-        addVisitForSite(bookmarkSite, intoHistory: history, from: .Remote, atTime: modifiedTime)
-        addVisitForSite(bookmarkSite, intoHistory: history, from: .Local, atTime: modifiedTime)
-        addVisitForSite(bookmarkSite, intoHistory: history, from: .Remote, atTime: modifiedTime)
-        
-        return BookmarkMirrorItem.bookmark("http://bookmark-\(i)/", modified: modifiedTime, hasDupe: false,
-                                            parentID: BookmarkRoots.MenuFolderGUID,
-                                            parentName: "Menu Bookmarks",
-                                            title: "\(i) Bookmark", description: nil,
-                                            URI: "http://bookmark-\(i)/", tags: "", keyword: nil)
+        addVisitForSite(bookmarkSite, intoHistory: history, from: .local, atTime: modifiedTime)
+        addVisitForSite(bookmarkSite, intoHistory: history, from: .remote, atTime: modifiedTime)
+        addVisitForSite(bookmarkSite, intoHistory: history, from: .local, atTime: modifiedTime)
+        addVisitForSite(bookmarkSite, intoHistory: history, from: .remote, atTime: modifiedTime)
+        let pageA = PageMetadata(id: nil, siteURL: bookmarkSite.url, mediaURL: "http://image.com",
+                                 title: bookmarkSite.title, description: "Test Description", type: nil, providerName: nil, mediaDataURI: nil, cacheImages: false)
+        metadata.storeMetadata(pageA, forPageURL: bookmarkSite.url.asURL!, expireAt: Date.now() + 3000).succeeded()
+        bookmarks.local.addToMobileBookmarks(URL(string:"http://bookmark-\(i)/")!, title: "\(i) Bookmark", favicon: nil).succeeded()
     }
-
-    bookmarks.applyRecords(bookmarkItems).succeeded()
 }

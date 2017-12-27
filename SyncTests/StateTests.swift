@@ -32,14 +32,14 @@ func compareScratchpads(tuple: (lhs: Scratchpad, rhs: Scratchpad)) {
 
 func roundtrip(s: Scratchpad) -> (Scratchpad, rhs: Scratchpad) {
     let prefs = MockProfilePrefs()
-    s.pickle(prefs)
+    let _ = s.pickle(prefs)
     return (s, rhs: Scratchpad.restoreFromPrefs(prefs, syncKeyBundle: s.syncKeyBundle)!)
 }
 
 class StateTests: XCTestCase {
     func getGlobal() -> Fetched<MetaGlobal> {
         let g = MetaGlobal(syncID: "abcdefghiklm", storageVersion: 5, engines: ["bookmarks": EngineMeta(version: 1, syncID: "dddddddddddd")], declined: ["tabs"])
-        return Fetched(value: g, timestamp: NSDate.now())
+        return Fetched(value: g, timestamp: Date.now())
     }
 
     func getEngineConfiguration() -> EngineConfiguration {
@@ -50,19 +50,19 @@ class StateTests: XCTestCase {
         let syncKeyBundle = KeyBundle.fromKB(Bytes.generateRandomBytes(32))
         let keys = Fetched(value: Keys(defaultBundle: syncKeyBundle), timestamp: 1001)
         let b = Scratchpad(b: syncKeyBundle, persistingTo: MockProfilePrefs()).evolve()
-        b.setKeys(keys)
+        let _ = b.setKeys(keys)
         b.localCommands = Set([
-            .EnableEngine(engine: "tabs"),
-            .DisableEngine(engine: "passwords"),
-            .ResetAllEngines(except: Set(["bookmarks", "clients"])),
-            .ResetEngine(engine: "clients")])
+            .enableEngine(engine: "tabs"),
+            .disableEngine(engine: "passwords"),
+            .resetAllEngines(except: Set<String>(["bookmarks", "clients"])),
+            .resetEngine(engine: "clients")])
         return b.build()
     }
 
     func testPickling() {
-        compareScratchpads(roundtrip(baseScratchpad()))
-        compareScratchpads(roundtrip(baseScratchpad().evolve().setGlobal(getGlobal()).build()))
-        compareScratchpads(roundtrip(baseScratchpad().evolve().clearLocalCommands().build()))
-        compareScratchpads(roundtrip(baseScratchpad().evolve().setEngineConfiguration(getEngineConfiguration()).build()))
+        compareScratchpads(tuple: roundtrip(s: baseScratchpad()))
+        compareScratchpads(tuple: roundtrip(s: baseScratchpad().evolve().setGlobal(getGlobal()).build()))
+        compareScratchpads(tuple: roundtrip(s: baseScratchpad().evolve().clearLocalCommands().build()))
+        compareScratchpads(tuple: roundtrip(s: baseScratchpad().evolve().setEngineConfiguration(getEngineConfiguration()).build()))
     }
 }

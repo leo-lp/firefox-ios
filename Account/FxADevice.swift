@@ -4,26 +4,28 @@
 
 import Foundation
 import Shared
+import SwiftyJSON
 
-public struct FxADevice {
-    let name: String
-    let id: String?
-    let type: String?
-    let isCurrentDevice: Bool
+public struct FxADevicePushParams {
+    let callback: String
+    let publicKey: String
+    let authKey: String
+}
 
-    private init(name: String, id: String?, type: String?, isCurrentDevice: Bool = false) {
-        self.name = name
-        self.id = id
-        self.type = type
-        self.isCurrentDevice = isCurrentDevice
+public class FxADevice: RemoteDevice {
+    let pushParams: FxADevicePushParams?
+
+    fileprivate init(name: String, id: String?, type: String?, isCurrentDevice: Bool = false, push: FxADevicePushParams?, lastAccessTime: Timestamp?) {
+        self.pushParams = push
+        super.init(id: id, name: name, type: type, isCurrentDevice: isCurrentDevice, lastAccessTime: lastAccessTime)
     }
 
-    static func forRegister(name: String, type: String) -> FxADevice {
-        return FxADevice(name: name, id: nil, type: type)
+    static func forRegister(_ name: String, type: String, push: FxADevicePushParams?) -> FxADevice {
+        return FxADevice(name: name, id: nil, type: type, push: push, lastAccessTime: nil)
     }
 
-    static func forUpdate(name: String, id: String) -> FxADevice {
-        return FxADevice(name: name, id: id, type: nil)
+    static func forUpdate(_ name: String, id: String, push: FxADevicePushParams?) -> FxADevice {
+        return FxADevice(name: name, id: id, type: nil, push: push, lastAccessTime: nil)
     }
 
     func toJSON() -> JSON {
@@ -31,19 +33,34 @@ public struct FxADevice {
         parameters["name"] = name
         parameters["id"] = id
         parameters["type"] = type
-
-        return JSON(parameters)
+        if let push = self.pushParams {
+            parameters["pushCallback"] = push.callback
+            parameters["pushPublicKey"] = push.publicKey
+            parameters["pushAuthKey"] = push.authKey
+        }
+        return JSON(parameters as NSDictionary)
     }
 
-    static func fromJSON(json: JSON) -> FxADevice? {
-        guard !json.isError,
-            let id = json["id"].asString,
-            let name = json["name"].asString,
-            let type = json["type"].asString else {
+    static func fromJSON(_ json: JSON) -> FxADevice? {
+        guard json.error == nil,
+            let id = json["id"].string,
+            let name = json["name"].string else {
                 return nil
         }
 
-        let isCurrentDevice = json["isCurrentDevice"].asBool ?? false
-        return FxADevice(name: name, id: id, type: type, isCurrentDevice: isCurrentDevice)
+        let isCurrentDevice = json["isCurrentDevice"].bool ?? false
+        let lastAccessTime = json["lastAccessTime"].uInt64
+        let type = json["type"].string
+
+        let push: FxADevicePushParams?
+        if let pushCallback = json["pushCallback"].stringValue(),
+            let publicKey = json["pushPublicKey"].stringValue(), publicKey != "",
+            let authKey   = json["pushAuthKey"].stringValue(), authKey != "" {
+            push = FxADevicePushParams(callback: pushCallback, publicKey: publicKey, authKey: authKey)
+        } else {
+            push = nil
+        }
+
+        return FxADevice(name: name, id: id, type: type, isCurrentDevice: isCurrentDevice, push: push, lastAccessTime: lastAccessTime)
     }
 }

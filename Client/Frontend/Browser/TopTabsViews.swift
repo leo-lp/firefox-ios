@@ -4,15 +4,71 @@
 
 import Foundation
 
+struct TopTabsSeparatorUX {
+    static let Identifier = "Separator"
+    static let Color = UIColor.Defaults.Grey70
+    static let Width: CGFloat = 1
+}
+
+class TopTabsSeparator: UICollectionReusableView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        self.backgroundColor = TopTabsSeparatorUX.Color
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+class TopTabsHeaderFooter: UICollectionReusableView {
+    let line = UIView()
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        addSubview(line)
+        line.backgroundColor = TopTabsSeparatorUX.Color
+    }
+
+    func arrangeLine(_ kind: String) {
+        line.snp.removeConstraints()
+        switch kind {
+            case UICollectionElementKindSectionHeader:
+                line.snp.makeConstraints { make in
+                    make.trailing.equalTo(self)
+                }
+            case UICollectionElementKindSectionFooter:
+                line.snp.makeConstraints { make in
+                    make.leading.equalTo(self)
+                }
+            default:
+                break
+        }
+        line.snp.makeConstraints { make in
+            make.height.equalTo(TopTabsUX.SeparatorHeight)
+            make.width.equalTo(TopTabsUX.SeparatorWidth)
+            make.top.equalTo(self).offset(TopTabsUX.SeparatorYOffset)
+        }
+    }
+
+    override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
+        layer.zPosition = CGFloat(layoutAttributes.zIndex)
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
 class TopTabCell: UICollectionViewCell {
     enum Style {
-        case Light
-        case Dark
+        case light
+        case dark
     }
     
     static let Identifier = "TopTabCellIdentifier"
+    static let ShadowOffsetSize: CGFloat = 2 //The shadow is used to hide the tab separator
     
-    var style: Style = .Light {
+    var style: Style = .light {
         didSet {
             if style != oldValue {
                 applyStyle(style)
@@ -20,32 +76,33 @@ class TopTabCell: UICollectionViewCell {
         }
     }
     
-    var seperatorLine: Bool = false {
-        didSet {
-            if seperatorLine != oldValue {
-                setNeedsDisplay()
-            }
-        }
-    }
-    
     var selectedTab = false {
         didSet {
-            bezierView.hidden = !selectedTab
-            if style == Style.Light {
-                titleText.textColor = UIColor.darkTextColor()
-            } else {
-                titleText.textColor = UIColor.lightTextColor()
+            backgroundColor = selectedTab ? UIColor.Defaults.Grey10 : UIColor.Defaults.Grey80
+            titleText.textColor = selectedTab ? UIColor.Defaults.Grey90 : UIColor.Defaults.Grey40
+            highlightLine.isHidden = !selectedTab
+            closeButton.tintColor = selectedTab ? UIColor.Defaults.Grey80 : UIColor.Defaults.Grey40
+            // restyle if we are in PBM
+            if style == .dark && selectedTab {
+                backgroundColor =  UIColor.Defaults.Grey70
+                titleText.textColor = UIColor.Defaults.Grey10
+                closeButton.tintColor = UIColor.Defaults.Grey10
             }
-            favicon.alpha = selectedTab ? 1.0 : 0.6
+            closeButton.backgroundColor = backgroundColor
+            closeButton.layer.shadowColor = backgroundColor?.cgColor
+            if selectedTab {
+                drawShadow()
+            }
         }
     }
     
     let titleText: UILabel = {
         let titleText = UILabel()
-        titleText.textAlignment = NSTextAlignment.Left
-        titleText.userInteractionEnabled = false
+        titleText.textAlignment = NSTextAlignment.left
+        titleText.isUserInteractionEnabled = false
         titleText.numberOfLines = 1
-        titleText.font = DynamicFontHelper.defaultHelper.DefaultSmallFontBold
+        titleText.lineBreakMode = .byCharWrapping
+        titleText.font = DynamicFontHelper.defaultHelper.DefaultSmallFont
         return titleText
     }()
     
@@ -58,70 +115,74 @@ class TopTabCell: UICollectionViewCell {
     
     let closeButton: UIButton = {
         let closeButton = UIButton()
-        closeButton.setImage(UIImage(named: "topTabs-closeTabs"), forState: UIControlState.Normal)
-        closeButton.tintColor = UIColor.lightGrayColor()
-        closeButton.imageEdgeInsets = UIEdgeInsetsMake(TabTrayControllerUX.CloseButtonEdgeInset, TabTrayControllerUX.CloseButtonEdgeInset, TabTrayControllerUX.CloseButtonEdgeInset, TabTrayControllerUX.CloseButtonEdgeInset)
+        closeButton.setImage(UIImage.templateImageNamed("menu-CloseTabs"), for: UIControlState())
+        closeButton.tintColor = UIColor.Defaults.Grey40
+        closeButton.imageEdgeInsets = UIEdgeInsets(top: 15, left: TopTabsUX.TabTitlePadding, bottom: 15, right: TopTabsUX.TabTitlePadding)
+        closeButton.layer.shadowOpacity = 0.8
+        closeButton.layer.masksToBounds = false
+        closeButton.layer.shadowOffset = CGSize(width: -TopTabsUX.TabTitlePadding, height: 0)
         return closeButton
     }()
-    
-    private let bezierView: BezierView = {
-        let bezierView = BezierView()
-        bezierView.fillColor = TopTabsUX.TopTabsBackgroundNormalColorInactive
-        return bezierView
+
+    let highlightLine: UIView = {
+        let line = UIView()
+        line.backgroundColor = UIColor.Defaults.Blue60
+        line.isHidden = true
+        return line
     }()
-    
+
     weak var delegate: TopTabCellDelegate?
     
     override init(frame: CGRect) {
         super.init(frame: frame)
         
-        closeButton.addTarget(self, action: #selector(TopTabCell.closeTab), forControlEvents: UIControlEvents.TouchUpInside)
-        
-        contentView.addSubview(self.bezierView)
-        contentView.addSubview(self.closeButton)
-        contentView.addSubview(self.titleText)
-        contentView.addSubview(self.favicon)
-        
-        bezierView.snp_makeConstraints { make in
-            make.centerY.centerX.equalTo(self)
-            make.height.equalTo(self)
-            make.width.equalTo(frame.width+TopTabsUX.TopTabsBackgroundPadding)
-        }
-        favicon.snp_makeConstraints { make in
-            make.centerY.equalTo(self)
+        closeButton.addTarget(self, action: #selector(TopTabCell.closeTab), for: UIControlEvents.touchUpInside)
+
+        contentView.addSubview(titleText)
+        contentView.addSubview(closeButton)
+        contentView.addSubview(favicon)
+        contentView.addSubview(highlightLine)
+
+        favicon.snp.makeConstraints { make in
+            make.centerY.equalTo(self).offset(TopTabsUX.TabNudge)
             make.size.equalTo(TabTrayControllerUX.FaviconSize)
             make.leading.equalTo(self).offset(TopTabsUX.TabTitlePadding)
         }
-        titleText.snp_makeConstraints { make in
+        titleText.snp.makeConstraints { make in
             make.centerY.equalTo(self)
             make.height.equalTo(self)
-            make.width.equalTo(TopTabsUX.TabTitleWidth)
-            make.leading.equalTo(favicon.snp_trailing).offset(TopTabsUX.TabTitlePadding)
+            make.trailing.equalTo(closeButton.snp.leading).offset(TopTabsUX.TabTitlePadding)
+            make.leading.equalTo(favicon.snp.trailing).offset(TopTabsUX.TabTitlePadding)
         }
-        closeButton.snp_makeConstraints { make in
-            make.centerY.equalTo(self)
+        closeButton.snp.makeConstraints { make in
+            make.centerY.equalTo(self).offset(TopTabsUX.TabNudge)
             make.height.equalTo(self)
-            make.width.equalTo(self.snp_height)
-            make.leading.equalTo(titleText.snp_trailing).offset(-5)
+            make.width.equalTo(self.snp.height).offset(-TopTabsUX.TabTitlePadding)
+            make.trailing.equalTo(self.snp.trailing)
+        }
+        highlightLine.snp.makeConstraints { make in
+            make.top.equalTo(self)
+            make.leading.equalTo(self).offset(-TopTabCell.ShadowOffsetSize)
+            make.trailing.equalTo(self).offset(TopTabCell.ShadowOffsetSize)
+            make.height.equalTo(TopTabsUX.HighlightLineWidth)
         }
         
         self.clipsToBounds = false
         
-        backgroundColor = UIColor.clearColor()
-        // Default style is light
         applyStyle(style)
     }
     
-    private func applyStyle(style: Style) {
+    fileprivate func applyStyle(_ style: Style) {
         switch style {
-        case Style.Light:
-            bezierView.fillColor = TopTabsUX.TopTabsBackgroundNormalColor
-            titleText.textColor = UIColor.darkTextColor()
-        case Style.Dark:
-            bezierView.fillColor = TopTabsUX.TopTabsBackgroundPrivateColor
-            titleText.textColor = UIColor.lightTextColor()
+        case Style.light:
+            titleText.textColor = UIColor.darkText
+            backgroundColor = UIConstants.AppBackgroundColor
+            highlightLine.backgroundColor = UIColor.Defaults.Blue60
+        case Style.dark:
+            titleText.textColor = UIColor.lightText
+            backgroundColor = UIColor.Defaults.Grey70
+            highlightLine.backgroundColor = UIColor.Defaults.Purple50
         }
-        bezierView.setNeedsDisplay()
     }
     
     required init?(coder aDecoder: NSCoder) {
@@ -130,217 +191,68 @@ class TopTabCell: UICollectionViewCell {
     
     override func prepareForReuse() {
         super.prepareForReuse()
-        self.titleText.font = DynamicFontHelper.defaultHelper.DefaultSmallFontBold
+        self.layer.shadowOpacity = 0
     }
     
     func closeTab() {
         delegate?.tabCellDidClose(self)
     }
-    
-    override func drawRect(rect: CGRect) {
-        super.drawRect(rect)
-        guard seperatorLine else {
-            return
-        }
-        guard let context = UIGraphicsGetCurrentContext() else { return }
-        CGContextSaveGState(context)
-        CGContextSetLineCap(context, CGLineCap.Square)
-        CGContextSetStrokeColorWithColor(context, UIColor.whiteColor().colorWithAlphaComponent(0.2).CGColor)
-        CGContextSetLineWidth(context, 1.0)
-        CGContextMoveToPoint(context, 0, TopTabsUX.BackgroundSeparatorLinePadding)
-        CGContextAddLineToPoint(context, 0, frame.size.height-TopTabsUX.BackgroundSeparatorLinePadding)
-        CGContextStrokePath(context)
-        CGContextRestoreGState(context)
-    }
-}
 
-private class BezierView: UIView {
-    var fillColor: UIColor?
-    init() {
-        super.init(frame: CGRect.zero)
-        self.backgroundColor = UIColor.clearColor()
+    // When a tab is selected the shadow prevents the tab separators from showing.
+    func drawShadow() {
+        self.layer.masksToBounds = false
+        self.layer.shadowColor = backgroundColor?.cgColor
+        self.layer.shadowOpacity  = 1
+        self.layer.shadowRadius = 0
+
+        self.layer.shadowPath = UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: self.frame.size.width + (TopTabCell.ShadowOffsetSize * 2), height: self.frame.size.height), cornerRadius: 0).cgPath
+        self.layer.shadowOffset = CGSize(width: -TopTabCell.ShadowOffsetSize, height: 0)
     }
-    
-    required init?(coder aDecoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-    
-    override func drawRect(rect: CGRect) {
-        super.drawRect(rect)
-        
-        guard let fillColor = self.fillColor else {
-            return
-        }
-        let bezierPath = UIBezierPath.topTabsCurve(frame.width, height: frame.height, direction: .Both)
-        
-        fillColor.setFill()
-        bezierPath.fill()
+
+    override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
+        layer.zPosition = CGFloat(layoutAttributes.zIndex)
     }
 }
 
 class TopTabFader: UIView {
     lazy var hMaskLayer: CAGradientLayer = {
-        let innerColor: CGColorRef = UIColor(white: 1.0, alpha: 1.0).CGColor
-        let outerColor: CGColorRef = UIColor(white: 1.0, alpha: 0.0).CGColor
+        let innerColor: CGColor = UIColor(white: 1, alpha: 1.0).cgColor
+        let outerColor: CGColor = UIColor(white: 1, alpha: 0.0).cgColor
         let hMaskLayer = CAGradientLayer()
         hMaskLayer.colors = [outerColor, innerColor, innerColor, outerColor]
-        hMaskLayer.locations = [0.00, 0.03, 0.97, 1.0]
-        hMaskLayer.startPoint = CGPointMake(0, 0.5)
-        hMaskLayer.endPoint = CGPointMake(1.0, 0.5)
-        hMaskLayer.anchorPoint = CGPointZero
+        hMaskLayer.locations = [0.00, 0.005, 0.995, 1.0]
+        hMaskLayer.startPoint = CGPoint(x: 0, y: 0.5)
+        hMaskLayer.endPoint = CGPoint(x: 1.0, y: 0.5)
+        hMaskLayer.anchorPoint = CGPoint.zero
         return hMaskLayer
     }()
     
     init() {
-        super.init(frame: CGRectZero)
+        super.init(frame: CGRect.zero)
         layer.mask = hMaskLayer
     }
     
     internal override func layoutSubviews() {
         super.layoutSubviews()
-        hMaskLayer.locations = [0.00, 15/frame.width, 1-15/frame.width, 1.0]
-        hMaskLayer.frame = CGRectMake(0, 0, frame.width, frame.height)
-    }
-    
-    required init?(coder aDecoder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
 
-class TopTabsBackgroundDecorationView: UICollectionReusableView {
-    static let Identifier = "TopTabsBackgroundDecorationViewIdentifier"
-    private lazy var rightCurve = SingleCurveView(right: true)
-    private lazy var leftCurve = SingleCurveView(right: false)
-    
-    private var themeColor: UIColor = TopTabsUX.TopTabsBackgroundNormalColorInactive {
-        didSet {
-            centerBackground.backgroundColor = themeColor
-            for curve in [rightCurve, leftCurve] {
-                curve.themeColor = themeColor
-                curve.setNeedsDisplay()
-            }
-        }
-    }
-    
-    lazy var centerBackground: UIView = {
-        let centerBackground = UIView()
-        return centerBackground
-    }()
-    
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        
-        self.contentMode = .Redraw
-        
-        self.addSubview(rightCurve)
-        self.addSubview(leftCurve)
-        self.addSubview(centerBackground)
-        
-        rightCurve.snp_makeConstraints { make in
-            make.right.equalTo(self)
-            make.top.equalTo(self)
-            make.bottom.equalTo(self)
-            make.width.equalTo(SingleCurveView.CurveWidth)
-        }
-        leftCurve.snp_makeConstraints { make in
-            make.left.equalTo(self)
-            make.top.equalTo(self)
-            make.bottom.equalTo(self)
-            make.width.equalTo(SingleCurveView.CurveWidth)
-        }
-        centerBackground.snp_makeConstraints { make in
-            make.left.equalTo(leftCurve.snp_right)
-            make.right.equalTo(rightCurve.snp_left)
-            make.top.equalTo(self)
-            make.bottom.equalTo(self)
-        }
+        let widthA = NSNumber(value: Float(CGFloat(8) / frame.width))
+        let widthB = NSNumber(value: Float(1 - CGFloat(8) / frame.width))
+
+        hMaskLayer.locations = [0.00, widthA, widthB, 1.0]
+        hMaskLayer.frame = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
     }
     
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-    
-    override func applyLayoutAttributes(layoutAttributes: UICollectionViewLayoutAttributes) {
-        super.applyLayoutAttributes(layoutAttributes)
-        if let decorationAttributes = layoutAttributes as? TopTabsViewLayoutAttributes, themeColor = decorationAttributes.themeColor {
-            self.themeColor = themeColor
-        }
-    }
-    
-    private class SingleCurveView: UIView {
-        static let CurveWidth: CGFloat = 50
-        private var themeColor: UIColor = TopTabsUX.TopTabsBackgroundNormalColorInactive
-        var right: Bool = true
-        init(right: Bool) {
-            self.right = right
-            super.init(frame: CGRectZero)
-        }
-        
-        required init?(coder aDecoder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-        
-        override func drawRect(rect: CGRect) {
-            super.drawRect(rect)
-            
-            let bezierPath = UIBezierPath.topTabsCurve(frame.width, height: frame.height, direction: right ? .Right : .Left)
-            
-            self.themeColor.setFill()
-            bezierPath.fill()
-        }
     }
 }
 
 class TopTabsViewLayoutAttributes: UICollectionViewLayoutAttributes {
-    var themeColor: UIColor?
-    
-    override func isEqual(object: AnyObject?) -> Bool {
+
+    override func isEqual(_ object: Any?) -> Bool {
         guard let object = object as? TopTabsViewLayoutAttributes else {
             return false
         }
-        if object.themeColor != self.themeColor {
-            return false
-        }
         return super.isEqual(object)
-    }
-}
-
-enum TopTabsCurveDirection {
-    case Right
-    case Left
-    case Both
-}
-
-extension UIBezierPath {
-    static func topTabsCurve(width: CGFloat, height: CGFloat, direction: TopTabsCurveDirection) -> UIBezierPath {
-        let x1: CGFloat = 32.84
-        let x2: CGFloat = 5.1
-        let x3: CGFloat = 19.76
-        let x4: CGFloat = 58.27
-        let x5: CGFloat = -12.15
-        
-        //// Bezier Drawing
-        let bezierPath = UIBezierPath()
-        bezierPath.moveToPoint(CGPoint(x: width, y: height))
-        switch direction {
-        case .Right:
-            bezierPath.addCurveToPoint(CGPoint(x: width-x1, y: 0), controlPoint1: CGPoint(x: width-x3, y: height), controlPoint2: CGPoint(x: width-x2, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: 0, y: 0), controlPoint1: CGPoint(x: 0, y: 0), controlPoint2: CGPoint(x: 0, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: 0, y: height), controlPoint1: CGPoint(x: 0, y: height), controlPoint2: CGPoint(x: 0, y: height))
-            bezierPath.addCurveToPoint(CGPoint(x: width, y: height), controlPoint1: CGPoint(x: x5, y: height), controlPoint2: CGPoint(x: width-x5, y: height))
-        case .Left:
-            bezierPath.addCurveToPoint(CGPoint(x: width, y: 0), controlPoint1: CGPoint(x: width, y: 0), controlPoint2: CGPoint(x: width, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: x1, y: 0), controlPoint1: CGPoint(x: width-x4, y: 0), controlPoint2: CGPoint(x: x4, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: 0, y: height), controlPoint1: CGPoint(x: x2, y: 0), controlPoint2: CGPoint(x: x3, y: height))
-            bezierPath.addCurveToPoint(CGPoint(x: width, y: height), controlPoint1: CGPoint(x: width, y: height), controlPoint2: CGPoint(x: width, y: height))
-        case .Both:
-            bezierPath.addCurveToPoint(CGPoint(x: width-x1, y: 0), controlPoint1: CGPoint(x: width-x3, y: height), controlPoint2: CGPoint(x: width-x2, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: x1, y: 0), controlPoint1: CGPoint(x: width-x4, y: 0), controlPoint2: CGPoint(x: x4, y: 0))
-            bezierPath.addCurveToPoint(CGPoint(x: 0, y: height), controlPoint1: CGPoint(x: x2, y: 0), controlPoint2: CGPoint(x: x3, y: height))
-            bezierPath.addCurveToPoint(CGPoint(x: width, y: height), controlPoint1: CGPoint(x: x5, y: height), controlPoint2: CGPoint(x: width-x5, y: height))
-        }
-        bezierPath.closePath()
-        bezierPath.miterLimit = 4
-        return bezierPath
     }
 }

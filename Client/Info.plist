@@ -6,8 +6,20 @@
 	<string>$(ADJUST_APP_TOKEN)</string>
 	<key>AdjustEnvironment</key>
 	<string>$(ADJUST_ENVIRONMENT)</string>
+	<key>MozDevelopmentTeam</key>
+	<string>$(DEVELOPMENT_TEAM)</string>
+	<key>LeanplumAppId</key>
+	<string></string>
+	<key>LeanplumProductionKey</key>
+	<string></string>
+	<key>LeanplumDevelopmentKey</key>
+	<string></string>
 	<key>AppIdentifierPrefix</key>
 	<string>$(APP_IDENTIFIER_PREFIX)</string>
+	<key>PocketEnvironmentAPIKey</key>
+	<string>$(POCKET_API_KEY)</string>
+	<key>MozWhatsNewTopic</key>
+	<string>whats-new-ios-9</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
@@ -23,7 +35,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>7.0</string>
+	<string>10.4</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleURLTypes</key>
@@ -44,6 +56,10 @@
 	<false/>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
+		<string>pocket</string>
+		<string>firefox-focus</string>
+		<string>firefox-klar</string>
+		<string>ymail</string>
 		<string>ms-outlook</string>
 		<string>airmail</string>
 		<string>italiaonline-mailto</string>
@@ -52,6 +68,8 @@
 		<string>readdle-spark</string>
 		<string>itms-books</string>
 		<string>org-appextension-feature-password-management</string>
+		<string>googlegmail</string>
+		<string>inbox-gmail</string>
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
@@ -68,6 +86,10 @@
 	<string>This lets you take and upload photos.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This lets you take and upload videos.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>This lets you save photos.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Firefox requires Face ID to access your saved logins.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>org.mozilla.ios.firefox.browsing</string>
@@ -106,10 +128,19 @@
 			<key>UIApplicationShortcutItemType</key>
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER).NewPrivateTab</string>
 		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemIconFile</key>
+			<string>menu-ScanQRCode</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>ShortcutItemTitleQRCode</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).QRCode</string>
+		</dict>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>remote-notification</string>
 	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
@@ -131,6 +162,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>SentryDSN</key>
+	<string>$(SENTRY_DSN)</string>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>UTImportedTypeDeclarations</key>

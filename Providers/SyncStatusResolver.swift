@@ -2,28 +2,25 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import Foundation
 import Sync
-import XCGLogger
-import Deferred
 import Shared
 import Storage
 
 public enum SyncDisplayState {
-    case InProgress
-    case Good
-    case Bad(message: String?)
-    case Warning(message: String)
+    case inProgress
+    case good
+    case bad(message: String?)
+    case warning(message: String)
 
     func asObject() -> [String: String]? {
         switch self {
-        case .Bad(let msg):
+        case .bad(let msg):
             guard let message = msg else {
                 return ["state": "Error"]
             }
             return ["state": "Error",
                     "message": message]
-        case .Warning(let message):
+        case .warning(let message):
             return ["state": "Warning",
                     "message": message]
         default:
@@ -35,20 +32,18 @@ public enum SyncDisplayState {
 
 public func ==(a: SyncDisplayState, b: SyncDisplayState) -> Bool {
     switch (a, b) {
-    case (.InProgress, .InProgress):
+    case (.inProgress, .inProgress):
         return true
-    case (.Good, .Good):
+    case (.good, .good):
         return true
-    case (.Bad(let a), .Bad(let b)) where a == b:
+    case (.bad(let a), .bad(let b)) where a == b:
         return true
-    case (.Warning(let a), .Warning(let b)) where a == b:
+    case (.warning(let a), .warning(let b)) where a == b:
         return true
     default:
         return false
     }
 }
-
-private let log = Logger.syncLogger
 
 /*
  * Translates the fine-grained SyncStatuses of each sync engine into a more coarse-grained
@@ -61,65 +56,65 @@ public struct SyncStatusResolver {
     public func resolveResults() -> SyncDisplayState {
         guard let results = engineResults.successValue else {
             switch engineResults.failureValue {
-            case _ as BookmarksMergeError, _ as BookmarksDatabaseError:
-                return SyncDisplayState.Warning(message: String(format: Strings.FirefoxSyncPartialTitle, Strings.localizedStringForSyncComponent("bookmarks") ?? ""))
+            case _ as BookmarksMergeError, _ as BufferInvalidError:
+                return SyncDisplayState.warning(message: String(format: Strings.FirefoxSyncPartialTitle, Strings.localizedStringForSyncComponent("bookmarks") ?? ""))
             default:
-                return SyncDisplayState.Bad(message: nil)
+                return SyncDisplayState.bad(message: nil)
             }
         }
 
         // Run through the engine results and produce a relevant display status for each one
         let displayStates: [SyncDisplayState] = results.map { (engineIdentifier, syncStatus) in
-            log.debug("Sync status for \(engineIdentifier): \(syncStatus)")
+            print("Sync status for \(engineIdentifier): \(syncStatus)")
 
             // Explicitly call out each of the enum cases to let us lean on the compiler when
             // we add new error states
             switch syncStatus {
-            case .NotStarted(let reason):
+            case .notStarted(let reason):
                 switch reason {
-                case .Offline:
-                    return .Bad(message: Strings.FirefoxSyncOfflineTitle)
-                case .NoAccount:
-                    return .Warning(message: Strings.FirefoxSyncOfflineTitle)
-                case .Backoff(_):
-                    return .Good
-                case .EngineRemotelyNotEnabled(_):
-                    return .Good
-                case .EngineFormatOutdated(_):
-                    return .Good
-                case .EngineFormatTooNew(_):
-                    return .Good
-                case .StorageFormatOutdated(_):
-                    return .Good
-                case .StorageFormatTooNew(_):
-                    return .Good
-                case .StateMachineNotReady:
-                    return .Good
-                case .RedLight:
-                    return .Good
-                case .Unknown:
-                    return .Good
+                case .offline:
+                    return .bad(message: Strings.FirefoxSyncOfflineTitle)
+                case .noAccount:
+                    return .warning(message: Strings.FirefoxSyncOfflineTitle)
+                case .backoff(_):
+                    return .good
+                case .engineRemotelyNotEnabled(_):
+                    return .good
+                case .engineFormatOutdated(_):
+                    return .good
+                case .engineFormatTooNew(_):
+                    return .good
+                case .storageFormatOutdated(_):
+                    return .good
+                case .storageFormatTooNew(_):
+                    return .good
+                case .stateMachineNotReady:
+                    return .good
+                case .redLight:
+                    return .good
+                case .unknown:
+                    return .good
                 }
-            case .Completed:
-                return .Good
-            case .Partial:
-                return .Good
+            case .completed:
+                return .good
+            case .partial:
+                return .good
             }
         }
 
         // TODO: Instead of finding the worst offender in a list of statuses, we should better surface
         // what might have happened with a particular engine when syncing.
-        let aggregate: SyncDisplayState = displayStates.reduce(.Good) { carried, displayState in
+        let aggregate: SyncDisplayState = displayStates.reduce(.good) { carried, displayState in
             switch displayState {
 
-            case .Bad(_):
+            case .bad(_):
                 return displayState
 
-            case .Warning(_):
+            case .warning(_):
                 // If the state we're carrying is worse than the stale one, keep passing
                 // along the worst one
                 switch carried {
-                case .Bad(_):
+                case .bad(_):
                     return carried
                 default:
                     return displayState
@@ -130,7 +125,7 @@ public struct SyncStatusResolver {
             }
         }
 
-        log.debug("Resolved sync display state: \(aggregate)")
+        print("Resolved sync display state: \(aggregate)")
         return aggregate
     }
 }

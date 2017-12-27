@@ -9,36 +9,38 @@ import Account
 
 /// App Settings Screen (triggered by tapping the 'Gear' in the Tab Tray Controller)
 class AppSettingsTableViewController: SettingsTableViewController {
-    private let SectionHeaderIdentifier = "SectionHeaderIdentifier"
+    fileprivate let SectionHeaderIdentifier = "SectionHeaderIdentifier"
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        navigationItem.title = NSLocalizedString("Settings", comment: "Settings")
+        navigationItem.title = NSLocalizedString("Settings", comment: "Title in the settings view controller title bar")
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: NSLocalizedString("Done", comment: "Done button on left side of the Settings view controller title bar"),
-            style: UIBarButtonItemStyle.Done,
-            target: navigationController, action: Selector("SELdone"))
+            style: UIBarButtonItemStyle.done,
+            target: navigationController, action: #selector((navigationController as! SettingsNavigationController).SELdone))
         navigationItem.leftBarButtonItem?.accessibilityIdentifier = "AppSettingsTableViewController.navigationItem.leftBarButtonItem"
 
         tableView.accessibilityIdentifier = "AppSettingsTableViewController.tableView"
+        
+        // Refresh the user's FxA profile upon viewing settings. This will update their avatar,
+        // display name, etc.
+        if AppConstants.MOZ_SHOW_FXA_AVATAR {
+            profile.getAccount()?.updateProfile()
+        }
     }
 
     override func generateSettings() -> [SettingSection] {
         var settings = [SettingSection]()
 
         let privacyTitle = NSLocalizedString("Privacy", comment: "Privacy section title")
-        let accountDebugSettings: [Setting]
-        if AppConstants.BuildChannel != .Aurora {
-            accountDebugSettings = [
-                // Debug settings:
-                RequirePasswordDebugSetting(settings: self),
-                RequireUpgradeDebugSetting(settings: self),
-                ForgetSyncAuthStateDebugSetting(settings: self),
-            ]
-        } else {
-            accountDebugSettings = []
-        }
+        let accountDebugSettings = [
+            // Debug settings:
+            RequirePasswordDebugSetting(settings: self),
+            RequireUpgradeDebugSetting(settings: self),
+            ForgetSyncAuthStateDebugSetting(settings: self),
+            StageSyncServiceDebugSetting(settings: self),
+        ]
 
         let prefs = profile.prefs
         var generalSettings: [Setting] = [
@@ -47,13 +49,11 @@ class AppSettingsTableViewController: SettingsTableViewController {
             HomePageSetting(settings: self),
             OpenWithSetting(settings: self),
             BoolSetting(prefs: prefs, prefKey: "blockPopups", defaultValue: true,
-                titleText: NSLocalizedString("Block Pop-up Windows", comment: "Block pop-up windows setting")),
+                        titleText: NSLocalizedString("Block Pop-up Windows", comment: "Block pop-up windows setting")),
             BoolSetting(prefs: prefs, prefKey: "saveLogins", defaultValue: true,
-                titleText: NSLocalizedString("Save Logins", comment: "Setting to enable the built-in password manager")),
-            BoolSetting(prefs: prefs, prefKey: AllowThirdPartyKeyboardsKey, defaultValue: false,
-                titleText: NSLocalizedString("Allow Third-Party Keyboards", comment: "Setting to enable third-party keyboards"), statusText: NSLocalizedString("Firefox needs to reopen for this change to take effect.", comment: "Setting value prop to enable third-party keyboards")),
-        ]
-
+                        titleText: NSLocalizedString("Save Logins", comment: "Setting to enable the built-in password manager")),
+            ]        
+        
         let accountChinaSyncSetting: [Setting]
         if !profile.isChinaEdition {
             accountChinaSyncSetting = []
@@ -66,25 +66,31 @@ class AppSettingsTableViewController: SettingsTableViewController {
         // There is nothing to show in the Customize section if we don't include the compact tab layout
         // setting on iPad. When more options are added that work on both device types, this logic can
         // be changed.
-        if UIDevice.currentDevice().userInterfaceIdiom == .Phone {
-            generalSettings +=  [
-                BoolSetting(prefs: prefs, prefKey: "CompactTabLayout", defaultValue: true,
-                    titleText: NSLocalizedString("Use Compact Tabs", comment: "Setting to enable compact tabs in the tab overview"))
+
+        if AppConstants.MOZ_CLIPBOARD_BAR {
+            generalSettings += [
+                BoolSetting(prefs: prefs, prefKey: "showClipboardBar", defaultValue: false,
+                            titleText: Strings.SettingsOfferClipboardBarTitle,
+                            statusText: Strings.SettingsOfferClipboardBarStatus)
             ]
         }
 
+        var accountSectionTitle: NSAttributedString?
+        if AppConstants.MOZ_SHOW_FXA_AVATAR {
+            accountSectionTitle = NSAttributedString(string: Strings.FxAFirefoxAccount)
+        }
+
+        let footerText = !profile.hasAccount() ? NSAttributedString(string: Strings.FxASyncUsageDetails) : nil
         settings += [
-            SettingSection(title: nil, children: [
+            SettingSection(title: accountSectionTitle, footerTitle: footerText, children: [
                 // Without a Firefox Account:
                 ConnectSetting(settings: self),
+                AdvanceAccountSetting(settings: self),
                 // With a Firefox Account:
                 AccountStatusSetting(settings: self),
-                SyncNowSetting(settings: self)
+                SyncNowSetting(settings: self),
+                SyncSetting(settings: self)
             ] + accountChinaSyncSetting + accountDebugSettings)]
-
-        if !profile.hasAccount() {
-            settings += [SettingSection(title: NSAttributedString(string: NSLocalizedString("Sign in to get your tabs, bookmarks, and passwords from your other devices.", comment: "Clarify value prop under Sign In to Firefox in Settings.")), children: [])]
-        }
 
         settings += [ SettingSection(title: NSAttributedString(string: NSLocalizedString("General", comment: "General settings section title")), children: generalSettings)]
 
@@ -102,10 +108,13 @@ class AppSettingsTableViewController: SettingsTableViewController {
                 statusText: NSLocalizedString("When Leaving Private Browsing", tableName: "PrivateBrowsing", comment: "Will be displayed in Settings under 'Close Private Tabs'"))
         ]
 
+        if #available(iOS 11, *) {
+            privacySettings.append(ContentBlockerSetting(settings: self))
+        }
+
         privacySettings += [
             PrivacyPolicySetting()
         ]
-
 
         settings += [
             SettingSection(title: NSAttributedString(string: privacyTitle), children: privacySettings),
@@ -121,46 +130,29 @@ class AppSettingsTableViewController: SettingsTableViewController {
                 YourRightsSetting(),
                 ExportBrowserDataSetting(settings: self),
                 DeleteExportedDataSetting(settings: self),
-                EnableBookmarkMergingSetting(settings: self)
+                EnableBookmarkMergingSetting(settings: self),
+                ForceCrashSetting(settings: self)
             ])]
-            
-            if (profile.hasAccount()) {
-                settings += [
-                    SettingSection(title: nil, children: [
-                        DisconnectSetting(settings: self),
-                        ])
-                ]
+    
+            if profile.hasAccount() {
+                settings += [SettingSection(title: nil, footerTitle: NSAttributedString(string: ""), children: [DisconnectSetting(settings: self)])]
             }
 
         return settings
     }
 
-    override func tableView(tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let headerView = super.tableView(tableView, viewForHeaderInSection: section) as! SettingsTableSectionHeaderFooterView
+        // Prevent the top border from showing for the General section.
         if !profile.hasAccount() {
-            let headerView = tableView.dequeueReusableHeaderFooterViewWithIdentifier(SectionHeaderIdentifier) as! SettingsTableSectionHeaderFooterView
-            let sectionSetting = settings[section]
-            headerView.titleLabel.text = sectionSetting.title?.string
-
             switch section {
-                // Hide the bottom border for the Sign In to Firefox value prop
                 case 1:
-                    headerView.titleAlignment = .Top
-                    headerView.titleLabel.numberOfLines = 0
-                    headerView.showBottomBorder = false
-                    headerView.titleLabel.snp_updateConstraints { make in
-                        make.right.equalTo(headerView).offset(-50)
-                    }
-
-                // Hide the top border for the General section header when the user is not signed in.
-                case 2:
                     headerView.showTopBorder = false
-                default:
-                    return super.tableView(tableView, viewForHeaderInSection: section)
+            default:
+                break
             }
-            return headerView
         }
-        
-        return super.tableView(tableView, viewForHeaderInSection: section)
+        return headerView
     }
 }
 
@@ -174,7 +166,7 @@ extension AppSettingsTableViewController {
 
 extension AppSettingsTableViewController: PasscodeEntryDelegate {
     @objc func passcodeValidationDidSucceed() {
-        navigationController?.dismissViewControllerAnimated(true) {
+        navigationController?.dismiss(animated: true) {
             self.navigateToLoginsList()
         }
     }

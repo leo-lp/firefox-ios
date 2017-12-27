@@ -4,39 +4,44 @@
 
 import Foundation
 import Shared
-import WebImage
+import SDWebImage
 import XCGLogger
 
 private let log = Logger.browserLogger
 
 class TestAppDelegate: AppDelegate {
-    override func getProfile(application: UIApplication) -> Profile {
+    override func getProfile(_ application: UIApplication) -> Profile {
         if let profile = self.profile {
             return profile
         }
 
-        let profile = BrowserProfile(localName: "testProfile", app: application)
-        if NSProcessInfo.processInfo().arguments.contains(LaunchArguments.ClearProfile) {
+        var profile: BrowserProfile
+        let launchArguments = ProcessInfo.processInfo.arguments
+        if launchArguments.contains(LaunchArguments.ClearProfile) {
             // Use a clean profile for each test session.
-            _ = try? profile.files.removeFilesInDirectory()
-            profile.prefs.clearAll()
+            log.debug("Deleting all files in 'Documents' directory to clear the profile")
+            profile = BrowserProfile(localName: "testProfile", syncDelegate: application.syncDelegate, clear: true)
+        } else {
+            profile = BrowserProfile(localName: "testProfile", syncDelegate: application.syncDelegate)
+        }
 
-            // Don't show the What's New page.
+        // Don't show the What's New page.
+        if launchArguments.contains(LaunchArguments.SkipWhatsNew) {
             profile.prefs.setString(AppInfo.appVersion, forKey: LatestAppVersionProfileKey)
+        }
 
-            // Skip the intro when requested by for example tests or automation
-            if AppConstants.SkipIntro {
-                profile.prefs.setInt(1, forKey: IntroViewControllerSeenProfileKey)
-            }
+        // Skip the intro when requested by for example tests or automation
+        if launchArguments.contains(LaunchArguments.SkipIntro) {
+            profile.prefs.setInt(1, forKey: IntroViewControllerSeenProfileKey)
         }
 
         self.profile = profile
         return profile
     }
 
-    override func application(application: UIApplication, willFinishLaunchingWithOptions launchOptions: [NSObject : AnyObject]?) -> Bool {
+    override func application(_ application: UIApplication, willFinishLaunchingWithOptions launchOptions: [UIApplicationLaunchOptionsKey: Any]?) -> Bool {
         // If the app is running from a XCUITest reset all settings in the app
-        if NSProcessInfo.processInfo().arguments.contains(LaunchArguments.ClearProfile) {
+        if ProcessInfo.processInfo.arguments.contains(LaunchArguments.ClearProfile) {
             resetApplication()
         }
 
@@ -50,12 +55,12 @@ class TestAppDelegate: AppDelegate {
         log.debug("Wiping everything for a clean start.")
 
         // Clear image cache
-        SDImageCache.sharedImageCache().clearDisk()
-        SDImageCache.sharedImageCache().clearMemory()
+        SDImageCache.shared().clearDisk()
+        SDImageCache.shared().clearMemory()
 
         // Clear the cookie/url cache
-        NSURLCache.sharedURLCache().removeAllCachedResponses()
-        let storage = NSHTTPCookieStorage.sharedHTTPCookieStorage()
+        URLCache.shared.removeAllCachedResponses()
+        let storage = HTTPCookieStorage.shared
         if let cookies = storage.cookies {
             for cookie in cookies {
                 storage.deleteCookie(cookie)
@@ -64,21 +69,28 @@ class TestAppDelegate: AppDelegate {
 
         // Clear the documents directory
         var rootPath: String = ""
-        if let sharedContainerIdentifier = AppInfo.sharedContainerIdentifier(), url = NSFileManager.defaultManager().containerURLForSecurityApplicationGroupIdentifier(sharedContainerIdentifier), path = url.path {
-            rootPath = path
+        let sharedContainerIdentifier = AppInfo.sharedContainerIdentifier
+        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: sharedContainerIdentifier) {
+            rootPath = url.path
         } else {
-            rootPath = (NSSearchPathForDirectoriesInDomains(NSSearchPathDirectory.DocumentDirectory, NSSearchPathDomainMask.UserDomainMask, true)[0])
+            rootPath = (NSSearchPathForDirectoriesInDomains(FileManager.SearchPathDirectory.documentDirectory, FileManager.SearchPathDomainMask.userDomainMask, true)[0])
         }
-        let manager = NSFileManager.defaultManager()
-        let documents = NSURL(fileURLWithPath: rootPath)
-        let docContents = try! manager.contentsOfDirectoryAtPath(rootPath)
+        let manager = FileManager.default
+        let documents = URL(fileURLWithPath: rootPath)
+        let docContents = try! manager.contentsOfDirectory(atPath: rootPath)
         for content in docContents {
             do {
-                try manager.removeItemAtURL(documents.URLByAppendingPathComponent(content)!)
+                try manager.removeItem(at: documents.appendingPathComponent(content))
             } catch {
                 log.debug("Couldn't delete some document contents.")
             }
         }
+    }
+
+    override func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplicationLaunchOptionsKey: Any]?) -> Bool {
+        // Speed up the animations to 100 times as fast.
+        defer { application.keyWindow?.layer.speed = 100.0 }
+        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
 
 }

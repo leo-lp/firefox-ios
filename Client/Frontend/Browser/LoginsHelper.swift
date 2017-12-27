@@ -8,13 +8,14 @@ import Storage
 import XCGLogger
 import WebKit
 import Deferred
+import SwiftyJSON
 
 private let log = Logger.browserLogger
 
-class LoginsHelper: TabHelper {
-    private weak var tab: Tab?
-    private let profile: Profile
-    private var snackBar: SnackBar?
+class LoginsHelper: TabContentScript {
+    fileprivate weak var tab: Tab?
+    fileprivate let profile: Profile
+    fileprivate var snackBar: SnackBar?
 
     // Exposed for mocking purposes
     var logins: BrowserLogins {
@@ -29,8 +30,8 @@ class LoginsHelper: TabHelper {
         self.tab = tab
         self.profile = profile
 
-        if let path = NSBundle.mainBundle().pathForResource("LoginsHelper", ofType: "js"), source = try? NSString(contentsOfFile: path, encoding: NSUTF8StringEncoding) as String {
-            let userScript = WKUserScript(source: source, injectionTime: WKUserScriptInjectionTime.AtDocumentEnd, forMainFrameOnly: false)
+        if let path = Bundle.main.path(forResource: "LoginsHelper", ofType: "js"), let source = try? NSString(contentsOfFile: path, encoding: String.Encoding.utf8.rawValue) as String {
+            let userScript = WKUserScript(source: source, injectionTime: WKUserScriptInjectionTime.atDocumentEnd, forMainFrameOnly: false)
             tab.webView!.configuration.userContentController.addUserScript(userScript)
         }
     }
@@ -39,7 +40,7 @@ class LoginsHelper: TabHelper {
         return "loginsManagerMessageHandler"
     }
 
-    func userContentController(userContentController: WKUserContentController, didReceiveScriptMessage message: WKScriptMessage) {
+    func userContentController(_ userContentController: WKUserContentController, didReceiveScriptMessage message: WKScriptMessage) {
         guard var res = message.body as? [String: AnyObject] else { return }
         guard let type = res["type"] as? String else { return }
 
@@ -48,18 +49,18 @@ class LoginsHelper: TabHelper {
         // the system from terminating our app due to background disk access.
         // 
         // See https://bugzilla.mozilla.org/show_bug.cgi?id=1307822 for details.
-        guard UIApplication.sharedApplication().applicationState == .Active && !profile.isShutdown else {
+        guard UIApplication.shared.applicationState == .active && !profile.isShutdown else {
             return 
         }
 
         // We don't use the WKWebView's URL since the page can spoof the URL by using document.location
         // right before requesting login data. See bug 1194567 for more context.
-        if let url = message.frameInfo.request.URL {
+        if let url = message.frameInfo.request.url {
             // Since responses go to the main frame, make sure we only listen for main frame requests
             // to avoid XSS attacks.
-            if message.frameInfo.mainFrame && type == "request" {
-                res["username"] = ""
-                res["password"] = ""
+            if message.frameInfo.isMainFrame && type == "request" {
+                res["username"] = "" as AnyObject?
+                res["password"] = "" as AnyObject?
                 if let login = Login.fromScript(url, script: res),
                    let requestId = res["requestId"] as? String {
                     requestLogins(login, requestId: requestId)
@@ -74,45 +75,41 @@ class LoginsHelper: TabHelper {
         }
     }
 
-    class func replace(base: String, keys: [String], replacements: [String]) -> NSMutableAttributedString {
+    class func replace(_ base: String, keys: [String], replacements: [String]) -> NSMutableAttributedString {
         var ranges = [NSRange]()
         var string = base
-        for (index, key) in keys.enumerate() {
+        for (index, key) in keys.enumerated() {
             let replace = replacements[index]
-            let range = string.rangeOfString(key,
-                options: NSStringCompareOptions.LiteralSearch,
+            let range = string.range(of: key,
+                options: NSString.CompareOptions.literal,
                 range: nil,
                 locale: nil)!
-            string.replaceRange(range, with: replace)
-            let nsRange = NSMakeRange(string.startIndex.distanceTo(range.startIndex),
-                replace.characters.count)
+            string.replaceSubrange(range, with: replace)
+            let nsRange = NSRange(location: string.characters.distance(from: string.startIndex, to: range.lowerBound),
+                                  length: replace.characters.count)
             ranges.append(nsRange)
         }
 
         var attributes = [String: AnyObject]()
-        attributes[NSFontAttributeName] = UIFont.systemFontOfSize(13, weight: UIFontWeightRegular)
-        attributes[NSForegroundColorAttributeName] = UIColor.darkGrayColor()
+        attributes[NSFontAttributeName] = UIFont.systemFont(ofSize: 13, weight: UIFontWeightRegular)
+        attributes[NSForegroundColorAttributeName] = UIColor.darkGray
         let attr = NSMutableAttributedString(string: string, attributes: attributes)
-        let font: UIFont = UIFont.systemFontOfSize(13, weight: UIFontWeightMedium)
-        for (_, range) in ranges.enumerate() {
+        let font: UIFont = UIFont.systemFont(ofSize: 13, weight: UIFontWeightMedium)
+        for range in ranges {
             attr.addAttribute(NSFontAttributeName, value: font, range: range)
         }
         return attr
     }
 
-    func getLoginsForProtectionSpace(protectionSpace: NSURLProtectionSpace) -> Deferred<Maybe<Cursor<LoginData>>> {
+    func getLoginsForProtectionSpace(_ protectionSpace: URLProtectionSpace) -> Deferred<Maybe<Cursor<LoginData>>> {
         return profile.logins.getLoginsForProtectionSpace(protectionSpace)
     }
 
-    func updateLoginByGUID(guid: GUID, new: LoginData, significant: Bool) -> Success {
+    func updateLoginByGUID(_ guid: GUID, new: LoginData, significant: Bool) -> Success {
         return profile.logins.updateLoginByGUID(guid, new: new, significant: significant)
     }
 
-    func removeLoginsWithGUIDs(guids: [GUID]) -> Success {
-        return profile.logins.removeLoginsWithGUIDs(guids)
-    }
-
-    func setCredentials(login: LoginData) {
+    func setCredentials(_ login: LoginData) {
         if login.password.isEmpty {
             log.debug("Empty password")
             return
@@ -120,7 +117,7 @@ class LoginsHelper: TabHelper {
 
         profile.logins
                .getLoginsForProtectionSpace(login.protectionSpace, withUsername: login.username)
-               .uponQueue(dispatch_get_main_queue()) { res in
+               .uponQueue(DispatchQueue.main) { res in
             if let data = res.successValue {
                 log.debug("Found \(data.count) logins.")
                 for saved in data {
@@ -140,43 +137,40 @@ class LoginsHelper: TabHelper {
         }
     }
 
-    private func promptSave(login: LoginData) {
+    fileprivate func promptSave(_ login: LoginData) {
         guard login.isValid.isSuccess else {
             return
         }
 
-        let promptMessage: NSAttributedString
+        let promptMessage: String
         if let username = login.username {
-            let promptStringFormat = NSLocalizedString("LoginsHelper.PromptSaveLogin.Title", value: "Save login %@ for %@?", comment: "Prompt for saving a login. The first parameter is the username being saved. The second parameter is the hostname of the site.")
-            promptMessage = NSAttributedString(string: String(format: promptStringFormat, username, login.hostname))
+            promptMessage = String(format: Strings.SaveLoginUsernamePrompt, username, login.hostname)
         } else {
-            let promptStringFormat = NSLocalizedString("LoginsHelper.PromptSavePassword.Title", value: "Save password for %@?", comment: "Prompt for saving a password with no username. The parameter is the hostname of the site.")
-            promptMessage = NSAttributedString(string: String(format: promptStringFormat, login.hostname))
+            promptMessage = String(format: Strings.SaveLoginPrompt, login.hostname)
         }
 
-        if snackBar != nil {
-            tab?.removeSnackbar(snackBar!)
+        if let existingPrompt = self.snackBar {
+            tab?.removeSnackbar(existingPrompt)
         }
 
-        snackBar = TimerSnackBar(attrText: promptMessage,
-            img: UIImage(named: "key"),
-            buttons: [
-                SnackButton(title: Strings.LoginsHelperDontSaveButtonTitle, accessibilityIdentifier: "SaveLoginPrompt.dontSaveButton", callback: { (bar: SnackBar) -> Void in
-                    self.tab?.removeSnackbar(bar)
-                    self.snackBar = nil
-                    return
-                }),
-
-                SnackButton(title: Strings.LoginsHelperSaveLoginButtonTitle, accessibilityIdentifier: "SaveLoginPrompt.saveLoginButton", callback: { (bar: SnackBar) -> Void in
-                    self.tab?.removeSnackbar(bar)
-                    self.snackBar = nil
-                    self.profile.logins.addLogin(login)
-                })
-            ])
+        snackBar = TimerSnackBar(text: promptMessage, img: UIImage(named: "key"))
+        let dontSave = SnackButton(title: Strings.LoginsHelperDontSaveButtonTitle, accessibilityIdentifier: "SaveLoginPrompt.dontSaveButton") { bar in
+            self.tab?.removeSnackbar(bar)
+            self.snackBar = nil
+            return
+        }
+        let save = SnackButton(title: Strings.LoginsHelperSaveLoginButtonTitle, accessibilityIdentifier: "SaveLoginPrompt.saveLoginButton") { bar in
+            self.tab?.removeSnackbar(bar)
+            self.snackBar = nil
+            self.profile.logins.addLogin(login)
+            LeanPlumClient.shared.track(event: .savedLoginAndPassword)
+        }
+        snackBar?.addButton(dontSave)
+        snackBar?.addButton(save)
         tab?.addSnackbar(snackBar!)
     }
 
-    private func promptUpdateFromLogin(login old: LoginData, toLogin new: LoginData) {
+    fileprivate func promptUpdateFromLogin(login old: LoginData, toLogin new: LoginData) {
         guard new.isValid.isSuccess else {
             return
         }
@@ -185,40 +179,34 @@ class LoginsHelper: TabHelper {
 
         let formatted: String
         if let username = new.username {
-            let promptStringFormat = NSLocalizedString("LoginsHelper.PromptUpdateLogin.Title", value: "Update login %@ for %@?", comment: "Prompt for updating a login. The first parameter is the username for which the password will be updated for. The second parameter is the hostname of the site.")
-            formatted = String(format: promptStringFormat, username, new.hostname)
+            formatted = String(format: Strings.UpdateLoginUsernamePrompt, username, new.hostname)
         } else {
-            let promptStringFormat = NSLocalizedString("LoginsHelper.PromptUpdatePassword.Title", value: "Update password for %@?", comment: "Prompt for updating a password with no username. The parameter is the hostname of the site.")
-            formatted = String(format: promptStringFormat, new.hostname)
-        }
-        let promptMessage = NSAttributedString(string: formatted)
-
-        if snackBar != nil {
-            tab?.removeSnackbar(snackBar!)
+            formatted = String(format: Strings.UpdateLoginPrompt, new.hostname)
         }
 
-        snackBar = TimerSnackBar(attrText: promptMessage,
-            img: UIImage(named: "key"),
-            buttons: [
-                SnackButton(title: Strings.LoginsHelperDontSaveButtonTitle, accessibilityIdentifier: "UpdateLoginPrompt.dontSaveButton", callback: { (bar: SnackBar) -> Void in
-                    self.tab?.removeSnackbar(bar)
-                    self.snackBar = nil
-                    return
-                }),
+        if let existingPrompt = self.snackBar {
+            tab?.removeSnackbar(existingPrompt)
+        }
 
-                SnackButton(title: Strings.LoginsHelperUpdateButtonTitle, accessibilityIdentifier: "UpdateLoginPrompt.updateButton", callback: { (bar: SnackBar) -> Void in
-                    self.tab?.removeSnackbar(bar)
-                    self.snackBar = nil
-                    self.profile.logins.updateLoginByGUID(guid, new: new,
-                                                          significant: new.isSignificantlyDifferentFrom(old))
-                })
-            ])
+        snackBar = TimerSnackBar(text: formatted, img: UIImage(named: "key"))
+        let dontSave = SnackButton(title: Strings.LoginsHelperDontSaveButtonTitle, accessibilityIdentifier: "UpdateLoginPrompt.dontSaveButton") { bar in
+            self.tab?.removeSnackbar(bar)
+            self.snackBar = nil
+            return
+        }
+        let update = SnackButton(title: Strings.LoginsHelperUpdateButtonTitle, accessibilityIdentifier: "UpdateLoginPrompt.updateButton") { bar in
+            self.tab?.removeSnackbar(bar)
+            self.snackBar = nil
+            self.profile.logins.updateLoginByGUID(guid, new: new, significant: new.isSignificantlyDifferentFrom(old))
+        }
+        snackBar?.addButton(dontSave)
+        snackBar?.addButton(update)
         tab?.addSnackbar(snackBar!)
     }
 
-    private func requestLogins(login: LoginData, requestId: String) {
-        profile.logins.getLoginsForProtectionSpace(login.protectionSpace).uponQueue(dispatch_get_main_queue()) { res in
-            var jsonObj = [String: AnyObject]()
+    fileprivate func requestLogins(_ login: LoginData, requestId: String) {
+        profile.logins.getLoginsForProtectionSpace(login.protectionSpace).uponQueue(DispatchQueue.main) { res in
+            var jsonObj = [String: Any]()
             if let cursor = res.successValue {
                 log.debug("Found \(cursor.count) logins.")
                 jsonObj["requestId"] = requestId
@@ -227,7 +215,7 @@ class LoginsHelper: TabHelper {
             }
 
             let json = JSON(jsonObj)
-            let src = "window.__firefox__.logins.inject(\(json.toString()))"
+            let src = "window.__firefox__.logins.inject(\(json.stringValue()!))"
             self.tab?.webView?.evaluateJavaScript(src, completionHandler: { (obj, err) -> Void in
             })
         }

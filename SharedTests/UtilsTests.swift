@@ -46,18 +46,6 @@ class UtilsTests: XCTestCase {
         XCTAssertFalse(optArrayEqual(z, rhs: y))
     }
 
-    func testWithQueryParam() {
-        let urlA = NSURL(string: "http://foo.com/bar/")!
-        let urlB = NSURL(string: "http://bar.com/noo")!
-        let urlC = urlA.withQueryParam("ppp", value: "123")
-        let urlD = urlB.withQueryParam("qqq", value: "123")
-        let urlE = urlC.withQueryParam("rrr", value: "aaa")
-
-        XCTAssertEqual("http://foo.com/bar/?ppp=123", urlC.absoluteString)
-        XCTAssertEqual("http://bar.com/noo?qqq=123", urlD.absoluteString)
-        XCTAssertEqual("http://foo.com/bar/?ppp=123&rrr=aaa", urlE.absoluteString)
-    }
-
     func testChunk() {
         let examples: [([Int], Int, [[Int]])] = [
             ([], 2, []),
@@ -69,8 +57,52 @@ class UtilsTests: XCTestCase {
         ]
         for (arr, by, expected) in examples {
             // Turn the ArraySlices back into Arrays for comparison.
-            let actual = chunk(arr, by: by).map { Array($0) }
-            XCTAssertEqual(actual, expected)
+            let actual = chunk(arr as [Int], by: by).map { Array($0) }
+            XCTAssertEqual(expected as NSArray, actual as NSArray) //wtf. why is XCTAssert being so weeird
         }
+    }
+
+    func testChunkCollection() {
+        let examples: [([Int], Int, [[Int]])] = [
+            ([], 2, []),
+            ([1, 2], 0, [[1], [2]]),
+            ([1, 2], 1, [[1], [2]]),
+            ([1, 2, 3], 2, [[1, 2], [3]]),
+            ([1, 2], 3, [[1, 2]]),
+            ([1, 2, 3], 1, [[1], [2], [3]]),
+            ]
+        for (arr, by, expected) in examples {
+            let actual = chunkCollection(arr, by: by) { xs in [xs] }
+            XCTAssertEqual(expected as NSArray, actual as NSArray)
+        }
+    }
+
+    func testParseTimestamps() {
+        let millis = "1492316843992"        // Firefox for iOS produced millisecond timestamps. Oops.
+        let decimal = "1492316843.99"
+        let truncated = "1492316843"
+        let huge = "1844674407370955161512"
+
+        XCTAssertNil(decimalSecondsStringToTimestamp(""))
+        XCTAssertNil(decimalSecondsStringToTimestamp(huge))
+        XCTAssertNil(decimalSecondsStringToTimestamp("foo"))
+
+        XCTAssertNil(someKindOfTimestampStringToTimestamp(""))
+        XCTAssertNil(someKindOfTimestampStringToTimestamp(huge))
+        XCTAssertNil(someKindOfTimestampStringToTimestamp("foo"))
+
+        let ts1: Timestamp = 1492316843990
+        XCTAssertEqual(decimalSecondsStringToTimestamp(decimal) ?? 0, ts1)
+        XCTAssertEqual(someKindOfTimestampStringToTimestamp(decimal) ?? 0, ts1)
+
+        let ts2: Timestamp = 1492316843000
+        XCTAssertEqual(decimalSecondsStringToTimestamp(truncated) ?? 0, ts2)
+        XCTAssertEqual(someKindOfTimestampStringToTimestamp(truncated) ?? 0, ts2)
+
+        let ts3: Timestamp = 1492316843992000
+        XCTAssertEqual(decimalSecondsStringToTimestamp(millis) ?? 0, ts3)  // Oops.
+
+        let ts4: Timestamp = 1492316843992
+        XCTAssertEqual(someKindOfTimestampStringToTimestamp(millis) ?? 0, ts4)
     }
 }

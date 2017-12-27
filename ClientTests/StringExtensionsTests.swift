@@ -6,15 +6,6 @@ import Foundation
 import XCTest
 
 class StringExtensionsTests: XCTestCase {
-    func testContains() {
-        XCTAssertTrue("abcde".contains("abcde"))
-        XCTAssertTrue("abcde".contains(""))
-        XCTAssertTrue("abcde".contains("a"))
-        XCTAssertTrue("abcde".contains("e"))
-        XCTAssertFalse("abcde".contains("f"))
-        XCTAssertFalse("abcde".contains("fa"))
-        XCTAssertFalse("abcde".contains("ef"))
-    }
 
     func testStartsWith() {
         XCTAssertTrue("abcde".startsWith("abcde"))
@@ -54,9 +45,9 @@ class StringExtensionsTests: XCTestCase {
     }
 
     func testStringByTrimmingLeadingCharactersInSet() {
-        XCTAssertEqual("foo   ", "   foo   ".stringByTrimmingLeadingCharactersInSet(NSCharacterSet.whitespaceCharacterSet()))
-        XCTAssertEqual("foo456", "123foo456".stringByTrimmingLeadingCharactersInSet(NSCharacterSet.decimalDigitCharacterSet()))
-        XCTAssertEqual("", "123456".stringByTrimmingLeadingCharactersInSet(NSCharacterSet.decimalDigitCharacterSet()))
+        XCTAssertEqual("foo   ", "   foo   ".stringByTrimmingLeadingCharactersInSet(CharacterSet.whitespaces))
+        XCTAssertEqual("foo456", "123foo456".stringByTrimmingLeadingCharactersInSet(CharacterSet.decimalDigits))
+        XCTAssertEqual("", "123456".stringByTrimmingLeadingCharactersInSet(CharacterSet.decimalDigits))
     }
 
     func testStringSplitWithNewline() {
@@ -64,6 +55,20 @@ class StringExtensionsTests: XCTestCase {
         XCTAssertEqual("foo", "foo".stringSplitWithNewline())
         XCTAssertEqual("aaa\n bbb", "aaa bbb".stringSplitWithNewline())
         XCTAssertEqual("Mark as\n Read", "Mark as Read".stringSplitWithNewline())
+        XCTAssertEqual("aa\n bbbbbb", "aa bbbbbb".stringSplitWithNewline())
+    }
+
+    func testPercentEscaping() {
+        func roundtripTest(_ input: String, _ expected: String, file: StaticString = #file, line: UInt = #line) {
+            let observed = input.escape()!
+            XCTAssertEqual(observed, expected, "input is \(input)", file: file, line: line)
+            let roundtrip = observed.unescape()
+            XCTAssertEqual(roundtrip, input, "encoded is \(observed)", file: file, line: line)
+        }
+
+        roundtripTest("https://mozilla.com", "https://mozilla.com")
+        roundtripTest("http://www.cnn.com/2017/09/25/politics/north-korea-fm-us-bombers/index.html", "http://www.cnn.com/2017/09/25/politics/north-korea-fm-us-bombers/index.html")
+        roundtripTest("http://mozilla.com/?a=foo&b=bar", "http://mozilla.com/%3Fa%3Dfoo%26b%3Dbar")
     }
 
 }

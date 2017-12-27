@@ -5,12 +5,18 @@
 import XCTest
 
 class BaseTestCase: XCTestCase {
+    var navigator: Navigator<FxUserState>!
+    var app: XCUIApplication!
+    var userState: FxUserState!
 
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
-        let app = XCUIApplication()
-        restart(app)
+        app = XCUIApplication()
+        app.terminate()
+        restart(app, args: [LaunchArguments.ClearProfile, LaunchArguments.SkipIntro, LaunchArguments.SkipWhatsNew])
+        navigator = createScreenGraph(for: self, with: app).navigator()
+        userState = navigator.userState
     }
 
     override func tearDown() {
@@ -18,79 +24,94 @@ class BaseTestCase: XCTestCase {
         super.tearDown()
     }
 
-    func restart(app: XCUIApplication) {
-        app.terminate()
-        app.launchArguments.append(LaunchArguments.Test)
-        app.launchArguments.append(LaunchArguments.ClearProfile)
-        app.launch()
-        sleep(1)
+    func restart(_ app: XCUIApplication, args: [String] = []) {
+        XCUIDevice.shared().press(.home)
+        var launchArguments = [LaunchArguments.Test]
+        args.forEach { arg in
+            launchArguments.append(arg)
+        }
+        app.launchArguments = launchArguments
+        app.activate()
     }
-    
+
     //If it is a first run, first run window should be gone
     func dismissFirstRunUI() {
-        let firstRunUI = XCUIApplication().buttons["Start Browsing"]
-        
-        if (firstRunUI.exists) {
-            firstRunUI.tap()
+        let firstRunUI = XCUIApplication().scrollViews["IntroViewController.scrollView"]
+
+        if firstRunUI.exists {
+            firstRunUI.swipeLeft()
+            XCUIApplication().buttons["Start Browsing"].tap()
         }
     }
-    
-    func waitforExistence(element: XCUIElement) {
-        let exists = NSPredicate(format: "exists == true")
-        
-        expectationForPredicate(exists, evaluatedWithObject: element, handler: nil)
-        waitForExpectationsWithTimeout(20, handler: nil)
-    }
-    
-    func waitforNoExistence(element: XCUIElement) {
-        let exists = NSPredicate(format: "exists != true")
-        
-        expectationForPredicate(exists, evaluatedWithObject: element, handler: nil)
-        waitForExpectationsWithTimeout(20, handler: nil)
-    }
-    
-    func waitForValueContains(element: XCUIElement, value: String) {
-        let predicateText = "value CONTAINS " + "'" + value + "'"
-        let valueCheck = NSPredicate(format: predicateText)
-        
-        expectationForPredicate(valueCheck, evaluatedWithObject: element, handler: nil)
-        waitForExpectationsWithTimeout(20, handler: nil)
+
+    func waitforExistence(_ element: XCUIElement, file: String = #file, line: UInt = #line) {
+        waitFor(element, with: "exists == true", file: file, line: line)
     }
 
-    func loadWebPage(url: String, waitForLoadToFinish: Bool = true) {
-        let loaded = NSPredicate(format: "value BEGINSWITH '100'")
+    func waitforNoExistence(_ element: XCUIElement, timeoutValue: TimeInterval = 5.0, file: String = #file, line: UInt = #line) {
+        waitFor(element, with: "exists != true", timeout: timeoutValue, file: file, line: line)
+    }
 
+    func waitForValueContains(_ element: XCUIElement, value: String, file: String = #file, line: UInt = #line) {
+        waitFor(element, with: "value CONTAINS '\(value)'", file: file, line: line)
+    }
+
+    private func waitFor(_ element: XCUIElement, with predicateString: String, description: String? = nil, timeout: TimeInterval = 5.0, file: String, line: UInt) {
+        let predicate = NSPredicate(format: predicateString)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        let result = XCTWaiter().wait(for: [expectation], timeout: timeout)
+        if result != .completed {
+            let message = description ?? "Expect predicate \(predicateString) for \(element.description)"
+            self.recordFailure(withDescription: message, inFile: file, atLine: line, expected: false)
+        }
+    }
+
+    func loadWebPage(_ url: String, waitForLoadToFinish: Bool = true, file: String = #file, line: UInt = #line) {
         let app = XCUIApplication()
-
-        UIPasteboard.generalPasteboard().string = url
-        app.textFields["url"].pressForDuration(2.0)
-        app.sheets.elementBoundByIndex(0).buttons.elementBoundByIndex(0).tap()
+        UIPasteboard.general.string = url
+        app.textFields["url"].press(forDuration: 2.0)
+        app.sheets.element(boundBy: 0).buttons.element(boundBy: 0).tap()
 
         if waitForLoadToFinish {
-            let finishLoadingTimeout: NSTimeInterval = 30
-            
-            let progressIndicator = app.progressIndicators.elementBoundByIndex(0)
-            expectationForPredicate(loaded, evaluatedWithObject: progressIndicator, handler: nil)
-            waitForExpectationsWithTimeout(finishLoadingTimeout, handler: nil)
+            let finishLoadingTimeout: TimeInterval = 30
+            let progressIndicator = app.progressIndicators.element(boundBy: 0)
+            waitFor(progressIndicator,
+                    with: "exists != true",
+                    description: "Problem loading \(url)",
+                    timeout: finishLoadingTimeout,
+                    file: file, line: line)
         }
     }
 
+    func iPad() -> Bool {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            return true
+        }
+        return false
+    }
+
+    func waitUntilPageLoad() {
+        let app = XCUIApplication()
+        let progressIndicator = app.progressIndicators.element(boundBy: 0)
+
+        waitforNoExistence(progressIndicator, timeoutValue: 20.0)
+    }
 }
 
 extension BaseTestCase {
     func tabTrayButton(forApp app: XCUIApplication) -> XCUIElement {
-        return app.buttons["TopTabsViewController.tabsButton"].exists ? app.buttons["TopTabsViewController.tabsButton"] : app.buttons["URLBarView.tabsButton"]
+        return app.buttons["TopTabsViewController.tabsButton"].exists ? app.buttons["TopTabsViewController.tabsButton"] : app.buttons["TabToolbar.tabsButton"]
     }
 }
 
 extension XCUIElement {
-    func tap(force force: Bool) {
+    func tap(force: Bool) {
         // There appears to be a bug with tapping elements sometimes, despite them being on-screen and tappable, due to hittable being false.
         // See: http://stackoverflow.com/a/33534187/1248491
-        if hittable {
+        if isHittable {
             tap()
         } else if force {
-            coordinateWithNormalizedOffset(CGVector(dx: 0.5, dy: 0.5)).tap()
+            coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         }
     }
 }

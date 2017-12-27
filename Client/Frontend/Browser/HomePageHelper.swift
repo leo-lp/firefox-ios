@@ -11,20 +11,19 @@ private let log = Logger.browserLogger
 struct HomePageConstants {
     static let HomePageURLPrefKey = "HomePageURLPref"
     static let DefaultHomePageURLPrefKey = PrefsKeys.KeyDefaultHomePageURL
-    static let HomePageButtonIsInMenuPrefKey = PrefsKeys.KeyHomePageButtonIsInMenu
 }
 
 class HomePageHelper {
 
     let prefs: Prefs
 
-    var currentURL: NSURL? {
+    var currentURL: URL? {
         get {
             return HomePageAccessors.getHomePage(prefs)
         }
         set {
-            if let url = newValue where url.isWebPage(includeDataURIs: false) && !url.isLocal {
-                prefs.setString(url.absoluteString!, forKey: HomePageConstants.HomePageURLPrefKey)
+            if let url = newValue, url.isWebPage(includeDataURIs: false) && !url.isLocal {
+                prefs.setString(url.absoluteString, forKey: HomePageConstants.HomePageURLPrefKey)
             } else {
                 prefs.removeObjectForKey(HomePageConstants.HomePageURLPrefKey)
             }
@@ -41,32 +40,32 @@ class HomePageHelper {
         self.prefs = prefs
     }
 
-    func openHomePage(tab: Tab) {
+    func openHomePage(_ tab: Tab) {
         guard let url = currentURL else {
             // this should probably never happen.
             log.error("User requested a homepage that wasn't a valid URL")
             return
         }
-        tab.loadRequest(NSURLRequest(URL: url))
+        tab.loadRequest(URLRequest(url: url))
     }
 
-    func openHomePage(inTab tab: Tab, withNavigationController navigationController: UINavigationController?) {
+    func openHomePage(inTab tab: Tab, presentAlertOn viewController: UIViewController?) {
         if isHomePageAvailable {
             openHomePage(tab)
         } else {
-            setHomePage(toTab: tab, withNavigationController: navigationController)
+            setHomePage(toTab: tab, presentAlertOn: viewController)
         }
     }
 
-    func setHomePage(toTab tab: Tab, withNavigationController navigationController: UINavigationController?) {
+    func setHomePage(toTab tab: Tab, presentAlertOn viewController: UIViewController?) {
         let alertController = UIAlertController(
             title: Strings.SetHomePageDialogTitle,
             message: Strings.SetHomePageDialogMessage,
-            preferredStyle: UIAlertControllerStyle.Alert)
-        alertController.addAction(UIAlertAction(title: Strings.SetHomePageDialogNo, style: .Cancel, handler: nil))
-        alertController.addAction(UIAlertAction(title: Strings.SetHomePageDialogYes, style: .Default) { _ in
-            self.currentURL = tab.url
-            })
-        navigationController?.presentViewController(alertController, animated: true, completion: nil)
+            preferredStyle: UIAlertControllerStyle.alert)
+        alertController.addAction(UIAlertAction(title: Strings.SetHomePageDialogNo, style: .cancel, handler: nil))
+        alertController.addAction(UIAlertAction(title: Strings.SetHomePageDialogYes, style: .default) { _ in
+            self.currentURL = tab.url as URL?
+        })
+        viewController?.present(alertController, animated: true, completion: nil)
     }
 }

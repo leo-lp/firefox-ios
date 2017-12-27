@@ -5,96 +5,104 @@
 import WebKit
 
 protocol ContextMenuHelperDelegate: class {
-    func contextMenuHelper(contextMenuHelper: ContextMenuHelper, didLongPressElements elements: ContextMenuHelper.Elements, gestureRecognizer: UILongPressGestureRecognizer)
+    func contextMenuHelper(_ contextMenuHelper: ContextMenuHelper, didLongPressElements elements: ContextMenuHelper.Elements, gestureRecognizer: UIGestureRecognizer)
+    func contextMenuHelper(_ contextMenuHelper: ContextMenuHelper, didCancelGestureRecognizer: UIGestureRecognizer)
 }
 
-class ContextMenuHelper: NSObject, TabHelper, UIGestureRecognizerDelegate {
-    private weak var tab: Tab?
-    weak var delegate: ContextMenuHelperDelegate?
-    private let gestureRecognizer = UILongPressGestureRecognizer()
-    private weak var selectionGestureRecognizer: UIGestureRecognizer?
-
+class ContextMenuHelper: NSObject {
     struct Elements {
-        let link: NSURL?
-        let image: NSURL?
+        let link: URL?
+        let image: URL?
     }
 
-    class func name() -> String {
-        return "ContextMenuHelper"
-    }
+    fileprivate weak var tab: Tab?
 
-    /// Clicking an element with VoiceOver fires touchstart, but not touchend, causing the context
-    /// menu to appear when it shouldn't (filed as rdar://22256909). As a workaround, disable the custom
-    /// context menu for VoiceOver users.
-    private var showCustomContextMenu: Bool {
-        return !UIAccessibilityIsVoiceOverRunning()
-    }
+    weak var delegate: ContextMenuHelperDelegate?
+
+    fileprivate var nativeHighlightLongPressRecognizer: UILongPressGestureRecognizer?
+    fileprivate var elements: Elements?
 
     required init(tab: Tab) {
         super.init()
+
         self.tab = tab
 
-        let path = NSBundle.mainBundle().pathForResource("ContextMenu", ofType: "js")!
-        let source = try! NSString(contentsOfFile: path, encoding: NSUTF8StringEncoding) as String
-        let userScript = WKUserScript(source: source, injectionTime: WKUserScriptInjectionTime.AtDocumentEnd, forMainFrameOnly: false)
-        tab.webView!.configuration.userContentController.addUserScript(userScript)
+        guard let path = Bundle.main.path(forResource: "ContextMenu", ofType: "js"),
+                let source = try? NSString(contentsOfFile: path, encoding: String.Encoding.utf8.rawValue) as String,
+                let webView = tab.webView else {
+            return
+        }
 
-        // Add a gesture recognizer that disables the built-in context menu gesture recognizer.
-        gestureRecognizer.delegate = self
-        tab.webView!.addGestureRecognizer(gestureRecognizer)
+        let userScript = WKUserScript(source: source, injectionTime: WKUserScriptInjectionTime.atDocumentEnd, forMainFrameOnly: false)
+        webView.configuration.userContentController.addUserScript(userScript)
+
+        nativeHighlightLongPressRecognizer = gestureRecognizerWithDescriptionFragment("action=_highlightLongPressRecognized:") as? UILongPressGestureRecognizer
+
+        if let nativeLongPressRecognizer = gestureRecognizerWithDescriptionFragment("action=_longPressRecognized:") as? UILongPressGestureRecognizer {
+            nativeLongPressRecognizer.removeTarget(nil, action: nil)
+            nativeLongPressRecognizer.addTarget(self, action: #selector(longPressGestureDetected(_:)))
+        }
+    }
+
+    func gestureRecognizerWithDescriptionFragment(_ descriptionFragment: String) -> UIGestureRecognizer? {
+        return tab?.webView?.scrollView.subviews.flatMap({ $0.gestureRecognizers }).joined().first(where: { $0.description.contains(descriptionFragment) })
+    }
+
+    func longPressGestureDetected(_ sender: UIGestureRecognizer) {
+        if sender.state == .cancelled {
+            delegate?.contextMenuHelper(self, didCancelGestureRecognizer: sender)
+            return
+        }
+
+        guard sender.state == .began, let elements = self.elements else {
+            return
+        }
+
+        delegate?.contextMenuHelper(self, didLongPressElements: elements, gestureRecognizer: sender)
+
+        // To prevent the tapped link from proceeding with navigation, "cancel" the native WKWebView
+        // `_highlightLongPressRecognizer`. This preserves the original behavior as seen here:
+        // https://github.com/WebKit/webkit/blob/d591647baf54b4b300ca5501c21a68455429e182/Source/WebKit/UIProcess/ios/WKContentViewInteraction.mm#L1600-L1614
+        if let nativeHighlightLongPressRecognizer = self.nativeHighlightLongPressRecognizer,
+            nativeHighlightLongPressRecognizer.isEnabled {
+            nativeHighlightLongPressRecognizer.isEnabled = false
+            nativeHighlightLongPressRecognizer.isEnabled = true
+        }
+
+        self.elements = nil
+    }
+}
+
+extension ContextMenuHelper: TabContentScript {
+    class func name() -> String {
+        return "ContextMenuHelper"
     }
 
     func scriptMessageHandlerName() -> String? {
         return "contextMenuMessageHandler"
     }
 
-    func userContentController(userContentController: WKUserContentController, didReceiveScriptMessage message: WKScriptMessage) {
-        if !showCustomContextMenu {
+    func userContentController(_ userContentController: WKUserContentController, didReceiveScriptMessage message: WKScriptMessage) {
+        guard let data = message.body as? [String: AnyObject] else {
             return
         }
 
-        let data = message.body as! [String: AnyObject]
-
-        // On sites where <a> elements have child text elements, the text selection delegate can be triggered
-        // when we show a context menu. To prevent this, cancel the text selection delegate if we know the
-        // user is long-pressing a link.
-        if let handled = data["handled"] as? Bool where handled {
-            // Setting `enabled = false` cancels the current gesture for this recognizer.
-            selectionGestureRecognizer?.enabled = false
-            selectionGestureRecognizer?.enabled = true
+        var linkURL: URL?
+        if let urlString = data["link"] as? String,
+                let escapedURLString = urlString.addingPercentEncoding(withAllowedCharacters: CharacterSet.URLAllowedCharacterSet()) {
+            linkURL = URL(string: escapedURLString)
         }
 
-        var linkURL: NSURL?
-        if let urlString = data["link"] as? String {
-            linkURL = NSURL(string: urlString.stringByAddingPercentEncodingWithAllowedCharacters(NSCharacterSet.URLAllowedCharacterSet())!)
-        }
-
-        var imageURL: NSURL?
-        if let urlString = data["image"] as? String {
-            imageURL = NSURL(string: urlString.stringByAddingPercentEncodingWithAllowedCharacters(NSCharacterSet.URLAllowedCharacterSet())!)
+        var imageURL: URL?
+        if let urlString = data["image"] as? String,
+                let escapedURLString = urlString.addingPercentEncoding(withAllowedCharacters: CharacterSet.URLAllowedCharacterSet()) {
+            imageURL = URL(string: escapedURLString)
         }
 
         if linkURL != nil || imageURL != nil {
-            let elements = Elements(link: linkURL, image: imageURL)
-            delegate?.contextMenuHelper(self, didLongPressElements: elements, gestureRecognizer: gestureRecognizer)
+            elements = Elements(link: linkURL, image: imageURL)
+        } else {
+            elements = nil
         }
-    }
-
-    func gestureRecognizer(gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWithGestureRecognizer otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return true
-    }
-
-    func gestureRecognizer(gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailByGestureRecognizer otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        // Hack to detect the built-in text selection gesture recognizer.
-        if let otherDelegate = otherGestureRecognizer.delegate where String(otherDelegate).contains("_UIKeyboardBasedNonEditableTextSelectionGestureController") {
-            selectionGestureRecognizer = otherGestureRecognizer
-        }
-
-        // Hack to detect the built-in context menu gesture recognizer.
-        return otherGestureRecognizer is UILongPressGestureRecognizer && otherGestureRecognizer.delegate?.description.rangeOfString("WKContentView") != nil
-    }
-
-    func gestureRecognizerShouldBegin(gestureRecognizer: UIGestureRecognizer) -> Bool {
-        return showCustomContextMenu
     }
 }

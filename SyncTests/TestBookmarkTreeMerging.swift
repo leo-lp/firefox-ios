@@ -10,7 +10,7 @@ import Shared
 import XCTest
 
 extension Dictionary {
-    init<S: SequenceType where S.Generator.Element == Element>(seq: S) {
+    init<S: Sequence>(seq: S) where S.Iterator.Element == Element {
         self.init()
         for (k, v) in seq {
             self[k] = v
@@ -21,14 +21,14 @@ extension Dictionary {
 class MockLocalItemSource: LocalItemSource {
     var local: [GUID: BookmarkMirrorItem] = [:]
 
-    func getLocalItemWithGUID(guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
+    func getLocalItemWithGUID(_ guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
         guard let item = self.local[guid] else {
             return deferMaybe(DatabaseError(description: "Couldn't find item \(guid)."))
         }
         return deferMaybe(item)
     }
 
-    func getLocalItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> {
+    func getLocalItemsWithGUIDs<T: Collection>(_ guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> where T.Iterator.Element == GUID {
         var acc: [GUID: BookmarkMirrorItem] = [:]
         guids.forEach { guid in
             if let item = self.local[guid] {
@@ -38,7 +38,7 @@ class MockLocalItemSource: LocalItemSource {
         return deferMaybe(acc)
     }
 
-    func prefetchLocalItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Success {
+    func prefetchLocalItemsWithGUIDs<T: Collection>(_ guids: T) -> Success where T.Iterator.Element == GUID {
         return succeed()
     }
 }
@@ -46,14 +46,14 @@ class MockLocalItemSource: LocalItemSource {
 class MockMirrorItemSource: MirrorItemSource {
     var mirror: [GUID: BookmarkMirrorItem] = [:]
 
-    func getMirrorItemWithGUID(guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
+    func getMirrorItemWithGUID(_ guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
         guard let item = self.mirror[guid] else {
             return deferMaybe(DatabaseError(description: "Couldn't find item \(guid)."))
         }
         return deferMaybe(item)
     }
 
-    func getMirrorItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> {
+    func getMirrorItemsWithGUIDs<T: Collection>(_ guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> where T.Iterator.Element == GUID {
         var acc: [GUID: BookmarkMirrorItem] = [:]
         guids.forEach { guid in
             if let item = self.mirror[guid] {
@@ -63,7 +63,7 @@ class MockMirrorItemSource: MirrorItemSource {
         return deferMaybe(acc)
     }
 
-    func prefetchMirrorItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Success {
+    func prefetchMirrorItemsWithGUIDs<T: Collection>(_ guids: T) -> Success where T.Iterator.Element == GUID {
         return succeed()
     }
 }
@@ -71,7 +71,7 @@ class MockMirrorItemSource: MirrorItemSource {
 class MockBufferItemSource: BufferItemSource {
     var buffer: [GUID: BookmarkMirrorItem] = [:]
 
-    func getBufferItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> {
+    func getBufferItemsWithGUIDs<T: Collection>(_ guids: T) -> Deferred<Maybe<[GUID: BookmarkMirrorItem]>> where T.Iterator.Element == GUID {
         var acc: [GUID: BookmarkMirrorItem] = [:]
         guids.forEach { guid in
             if let item = self.buffer[guid] {
@@ -81,14 +81,18 @@ class MockBufferItemSource: BufferItemSource {
         return deferMaybe(acc)
     }
 
-    func getBufferItemWithGUID(guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
+    func getBufferItemWithGUID(_ guid: GUID) -> Deferred<Maybe<BookmarkMirrorItem>> {
         guard let item = self.buffer[guid] else {
             return deferMaybe(DatabaseError(description: "Couldn't find item \(guid)."))
         }
         return deferMaybe(item)
     }
 
-    func prefetchBufferItemsWithGUIDs<T: CollectionType where T.Generator.Element == GUID>(guids: T) -> Success {
+    func getBufferChildrenGUIDsForParent(_ guid: GUID) -> Deferred<Maybe<[GUID]>> {
+        return deferMaybe(DatabaseError(description: "Not implemented"))
+    }
+
+    func prefetchBufferItemsWithGUIDs<T: Collection>(_ guids: T) -> Success where T.Iterator.Element == GUID {
         return succeed()
     }
 }
@@ -115,19 +119,14 @@ class MockUploader {
         }
 
         // Now pretend we did the upload.
-        return onUpload(POSTResult(success: success, failed: [:]), NSDate.now())
+        return onUpload(POSTResult(success: success, failed: [:]), Date.now())
     }
 }
 
 // Thieved mercilessly from TestSQLiteBookmarks.
 private func getBrowserDBForFile(filename: String, files: FileAccessor) -> BrowserDB? {
-    let db = BrowserDB(filename: filename, files: files)
-
-    // BrowserTable exists only to perform create/update etc. operations -- it's not
-    // a queryable thing that needs to stick around.
-    if db.createOrUpdate(BrowserTable()) != .Success {
-        return nil
-    }
+    let db = BrowserDB(filename: filename, schema: BrowserSchema(), files: files)
+    db.touch().succeeded() // Ensure the schema is created/updated in advance
     return db
 }
 
@@ -155,11 +154,17 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
     private func getBrowserDB(name: String) -> BrowserDB? {
         let file = "TBookmarkTreeMerging\(name).db"
-        return getBrowserDBForFile(file, files: self.files)
+        return getBrowserDBForFile(filename: file, files: self.files)
+    }
+
+    private func mockStatsSessionForBookmarks() -> SyncEngineStatsSession {
+        let session = SyncEngineStatsSession(collection: "bookmarks")
+        session.start()
+        return session
     }
 
     func getSyncableBookmarks(name: String) -> MergedSQLiteBookmarks? {
-        guard let db = self.getBrowserDB(name) else {
+        guard let db = self.getBrowserDB(name: name) else {
             XCTFail("Couldn't get prepared DB.")
             return nil
         }
@@ -168,7 +173,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
     }
 
     func getSQLiteBookmarks(name: String) -> SQLiteBookmarks? {
-        guard let db = self.getBrowserDB(name) else {
+        guard let db = self.getBrowserDB(name: name) else {
             XCTFail("Couldn't get prepared DB.")
             return nil
         }
@@ -177,7 +182,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
     }
 
     func dbLocalTree(name: String) -> BookmarkTree? {
-        guard let bookmarks = self.getSQLiteBookmarks(name) else {
+        guard let bookmarks = self.getSQLiteBookmarks(name: name) else {
             XCTFail("Couldn't get bookmarks.")
             return nil
         }
@@ -186,8 +191,8 @@ class TestBookmarkTreeMerging: FailFastTestCase {
     }
 
     func localTree() -> BookmarkTree {
-        let roots = BookmarkRoots.RootChildren.map { BookmarkTreeNode.Folder(guid: $0, children: []) }
-        let places = BookmarkTreeNode.Folder(guid: BookmarkRoots.RootGUID, children: roots)
+        let roots = BookmarkRoots.RootChildren.map { BookmarkTreeNode.folder(guid: $0, children: []) }
+        let places = BookmarkTreeNode.folder(guid: BookmarkRoots.RootGUID, children: roots)
 
         var lookup: [GUID: BookmarkTreeNode] = [:]
         var parents: [GUID: GUID] = [:]
@@ -204,7 +209,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
     // Our synthesized tree is the same as the one we pull out of a brand new local DB.
     func testLocalTreeAssumption() {
         let constructed = self.localTree()
-        let fromDB = self.dbLocalTree("A")
+        let fromDB = self.dbLocalTree(name: "A")
         XCTAssertNotNil(fromDB)
         XCTAssertTrue(fromDB!.isFullyRootedIn(constructed))
         XCTAssertTrue(constructed.isFullyRootedIn(fromDB!))
@@ -243,14 +248,14 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         let local = MockLocalItemSource()
 
         func makeRoot(guid: GUID, _ name: String) {
-            local.local[guid] = BookmarkMirrorItem.folder(guid, modified: NSDate.now(), hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: name, description: nil, children: [])
+            local.local[guid] = BookmarkMirrorItem.folder(guid, dateAdded: Date.now(), modified: Date.now(), hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: name, description: nil, children: [])
         }
 
-        makeRoot(BookmarkRoots.MenuFolderGUID, "Bookmarks Menu")
-        makeRoot(BookmarkRoots.ToolbarFolderGUID, "Bookmarks Toolbar")
-        makeRoot(BookmarkRoots.MobileFolderGUID, "Mobile Bookmarks")
-        makeRoot(BookmarkRoots.UnfiledFolderGUID, "Unsorted Bookmarks")
-        makeRoot(BookmarkRoots.RootGUID, "")
+        makeRoot(guid: BookmarkRoots.MenuFolderGUID, "Bookmarks Menu")
+        makeRoot(guid: BookmarkRoots.ToolbarFolderGUID, "Bookmarks Toolbar")
+        makeRoot(guid: BookmarkRoots.MobileFolderGUID, "Mobile Bookmarks")
+        makeRoot(guid: BookmarkRoots.UnfiledFolderGUID, "Unsorted Bookmarks")
+        makeRoot(guid: BookmarkRoots.RootGUID, "")
 
         return ItemSources(local: local, mirror: MockMirrorItemSource(), buffer: MockBufferItemSource())
     }
@@ -276,22 +281,22 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         }
 
         XCTAssertFalse(result.isNoOp)
-        XCTAssertTrue(result.overrideCompletion.processedLocalChanges.isSupersetOf(Set(BookmarkRoots.RootChildren)))
+        XCTAssertTrue(result.overrideCompletion.processedLocalChanges.isSuperset(of: Set(BookmarkRoots.RootChildren)))
 
         // We should be dropping the roots from local, and uploading roots to the server.
         // The outgoing records should use Sync-style IDs.
         // We never upload the places root.
         let banned = Set<GUID>(["places", BookmarkRoots.RootGUID])
-        XCTAssertTrue(banned.isDisjointWith(result.uploadCompletion.records.map { $0.id }))
-        XCTAssertTrue(banned.isDisjointWith(result.uploadCompletion.amendChildrenFromBuffer.keys))
-        XCTAssertTrue(banned.isDisjointWith(result.uploadCompletion.amendChildrenFromMirror.keys))
-        XCTAssertTrue(banned.isDisjointWith(result.uploadCompletion.amendChildrenFromLocal.keys))
+        XCTAssertTrue(banned.isDisjoint(with: Set(result.uploadCompletion.records.map { $0.id })))
+        XCTAssertTrue(banned.isDisjoint(with: result.uploadCompletion.amendChildrenFromBuffer.keys))
+        XCTAssertTrue(banned.isDisjoint(with: result.uploadCompletion.amendChildrenFromMirror.keys))
+        XCTAssertTrue(banned.isDisjoint(with: result.uploadCompletion.amendChildrenFromLocal.keys))
         XCTAssertEqual(Set(BookmarkRoots.RootChildren), Set(result.uploadCompletion.amendChildrenFromLocal.keys))
         XCTAssertEqual(Set(BookmarkRoots.Real), result.overrideCompletion.processedLocalChanges)
     }
 
     func testMergingStorageLocalRootsEmptyServer() {
-        guard let bookmarks = self.getSyncableBookmarks("B") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "B") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
@@ -308,7 +313,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         let uploader = MockUploader()
         let storer = uploader.getStorer()
-        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, greenLight: { true })
+        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         applier.go().succeeded()
 
         // Now the local contents are replicated into the mirror, and both the buffer and local are empty.
@@ -358,26 +363,27 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         //       |    |
         //       F    E
         //
-        guard let bookmarks = self.getSyncableBookmarks("G") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "G") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
 
         // Set up the mirror.
-        let mirrorDate = NSDate.now() - 100000
+        let dateAdded = Date.now() - 200000
+        let mirrorDate = Date.now() - 100000
         let records = [
-            BookmarkMirrorItem.folder(BookmarkRoots.RootGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "", description: "", children: BookmarkRoots.RootChildren),
-            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["folderCCCCCC"]),
-            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: []),
-            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: ["folderAAAAAA"]),
-            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: []),
-            BookmarkMirrorItem.folder("folderAAAAAA", modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: ["folderBBBBBB"]),
-            BookmarkMirrorItem.folder("folderBBBBBB", modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "B", description: "", children: []),
-            BookmarkMirrorItem.folder("folderCCCCCC", modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "Bookmarks Menu", title: "C", description: "", children: ["folderDDDDDD"]),
-            BookmarkMirrorItem.folder("folderDDDDDD", modified: mirrorDate, hasDupe: false, parentID: "folderCCCCCC", parentName: "C", title: "D", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.RootGUID, dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "", description: "", children: BookmarkRoots.RootChildren),
+            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["folderCCCCCC"]),
+            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: ["folderAAAAAA"]),
+            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: ["folderBBBBBB"]),
+            BookmarkMirrorItem.folder("folderBBBBBB", dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "B", description: "", children: []),
+            BookmarkMirrorItem.folder("folderCCCCCC", dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "Bookmarks Menu", title: "C", description: "", children: ["folderDDDDDD"]),
+            BookmarkMirrorItem.folder("folderDDDDDD", dateAdded: dateAdded, modified: mirrorDate, hasDupe: false, parentID: "folderCCCCCC", parentName: "C", title: "D", description: "", children: []),
         ]
 
-        bookmarks.populateMirrorViaBuffer(records, atDate: mirrorDate)
+        bookmarks.populateMirrorViaBuffer(items: records, atDate: mirrorDate)
         bookmarks.wipeLocal()
 
         // Now the buffer is empty, and the mirror tree is what we expect.
@@ -394,12 +400,12 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         XCTAssertTrue(edgesBefore.buffer.isEmpty)
 
         // Set up the buffer.
-        let bufferDate = NSDate.now()
+        let bufferDate = Date.now()
         let changedBufferRecords = [
-            BookmarkMirrorItem.deleted(BookmarkNodeType.Folder, guid: "folderBBBBBB", modified: bufferDate),
-            BookmarkMirrorItem.folder("folderAAAAAA", modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: []),
-            BookmarkMirrorItem.folder("folderDDDDDD", modified: bufferDate, hasDupe: false, parentID: "folderCCCCCC", parentName: "C", title: "D", description: "", children: ["bookmarkFFFF"]),
-            BookmarkMirrorItem.bookmark("bookmarkFFFF", modified: bufferDate, hasDupe: false, parentID: "folderDDDDDD", parentName: "D", title: "F", description: nil, URI: "http://example.com/f", tags: "", keyword: nil),
+            BookmarkMirrorItem.deleted(BookmarkNodeType.folder, guid: "folderBBBBBB", modified: bufferDate),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: dateAdded, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: []),
+            BookmarkMirrorItem.folder("folderDDDDDD", dateAdded: dateAdded, modified: bufferDate, hasDupe: false, parentID: "folderCCCCCC", parentName: "C", title: "D", description: "", children: ["bookmarkFFFF"]),
+            BookmarkMirrorItem.bookmark("bookmarkFFFF", dateAdded: dateAdded, modified: bufferDate, hasDupe: false, parentID: "folderDDDDDD", parentName: "D", title: "F", description: nil, URI: "http://example.com/f", tags: "", keyword: nil),
         ]
 
         bookmarks.applyRecords(changedBufferRecords).succeeded()
@@ -466,11 +472,11 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         // Everything in local is getting dropped.
         let formerLocalIDs = Set(edges.local.lookup.keys)
-        XCTAssertTrue(result.overrideCompletion.processedLocalChanges.isSupersetOf(formerLocalIDs))
+        XCTAssertTrue(result.overrideCompletion.processedLocalChanges.isSuperset(of: formerLocalIDs))
 
         // Everything in the buffer is getting dropped.
         let formerBufferIDs = Set(edges.buffer.lookup.keys)
-        XCTAssertTrue(result.bufferCompletion.processedBufferChanges.isSupersetOf(formerBufferIDs))
+        XCTAssertTrue(result.bufferCompletion.processedBufferChanges.isSuperset(of: formerBufferIDs))
 
         // The mirror will now contain everything added by each side, and not the deleted folders.
         XCTAssertEqual(result.overrideCompletion.mirrorItemsToDelete, Set(["folderBBBBBB", "folderDDDDDD"]))
@@ -487,28 +493,30 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         // insertedGUID (new local record), A (new child), and D (deleted).
 
         // Anything that was in the mirror and only changed structure:
-        XCTAssertEqual(result.uploadCompletion.amendChildrenFromMirror, ["folderCCCCCC": ["bookmarkFFFF"], "folderAAAAAA": [insertedGUID]])
+        let expected: [GUID: [GUID]] =  ["folderCCCCCC": ["bookmarkFFFF"], "folderAAAAAA": [insertedGUID]]
+        let actual: [GUID: [GUID]] = result.uploadCompletion.amendChildrenFromMirror
+        XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
 
         // Anything deleted:
-        XCTAssertTrue(result.uploadCompletion.records.contains { ($0.id == "folderDDDDDD") && ($0.payload["deleted"].asBool ?? false) })
+        XCTAssertTrue(result.uploadCompletion.records.contains(where: { (($0.id == "folderDDDDDD") && ($0.payload["deleted"].bool ?? false)) }))
 
         // Inserted:
         let uploadE = result.uploadCompletion.records.find { $0.id == insertedGUID }
         XCTAssertNotNil(uploadE)
-        XCTAssertEqual(uploadE!.payload["title"].asString!, "E")
+        XCTAssertEqual(uploadE!.payload["title"].stringValue, "E")
 
         // We fixed the parent before uploading.
-        XCTAssertEqual(uploadE!.payload["parentid"].asString!, "folderAAAAAA")
-        XCTAssertEqual(uploadE!.payload["parentName"].asString ?? "", "A")
+        XCTAssertEqual(uploadE!.payload["parentid"].stringValue, "folderAAAAAA")
+        XCTAssertEqual(uploadE!.payload["parentName"].string ?? "", "A")
 
         // Reparented:
         let uploadF = result.uploadCompletion.records.find { $0.id == "bookmarkFFFF" }
         XCTAssertNotNil(uploadF)
-        XCTAssertEqual(uploadF!.payload["title"].asString!, "F")
+        XCTAssertEqual(uploadF!.payload["title"].stringValue, "F")
 
         // We fixed the parent before uploading.
-        XCTAssertEqual(uploadF!.payload["parentid"].asString!, "folderCCCCCC")
-        XCTAssertEqual(uploadF!.payload["parentName"].asString ?? "", "C")
+        XCTAssertEqual(uploadF!.payload["parentid"].stringValue, "folderCCCCCC")
+        XCTAssertEqual(uploadF!.payload["parentName"].string ?? "", "C")
     }
 
     func testComplexMoveWithAdditions() {
@@ -536,25 +544,25 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         // … but we'll settle for any order of children for [A] that preserves B < E
         // and B < D -- in other words, (B E D) and (B D E) are both acceptable.
         //
-        guard let bookmarks = self.getSyncableBookmarks("F") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "F") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
 
         // Set up the mirror.
-        let mirrorDate = NSDate.now() - 100000
+        let mirrorDate = Date.now() - 100000
         let records = [
-            BookmarkMirrorItem.folder(BookmarkRoots.RootGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "", description: "", children: BookmarkRoots.RootChildren),
-            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["folderAAAAAA"]),
-            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: []),
-            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: []),
-            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: []),
-            BookmarkMirrorItem.folder("folderAAAAAA", modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "Bookmarks Menu", title: "A", description: "", children: ["bookmarkBBBB", "bookmarkCCCC"]),
-            BookmarkMirrorItem.bookmark("bookmarkBBBB", modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "B", description: nil, URI: "http://example.com/b", tags: "", keyword: nil),
-            BookmarkMirrorItem.bookmark("bookmarkCCCC", modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "C", description: nil, URI: "http://example.com/c", tags: "", keyword: nil),
+            BookmarkMirrorItem.folder(BookmarkRoots.RootGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "", description: "", children: BookmarkRoots.RootChildren),
+            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["folderAAAAAA"]),
+            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "Bookmarks Menu", title: "A", description: "", children: ["bookmarkBBBB", "bookmarkCCCC"]),
+            BookmarkMirrorItem.bookmark("bookmarkBBBB", dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "B", description: nil, URI: "http://example.com/b", tags: "", keyword: nil),
+            BookmarkMirrorItem.bookmark("bookmarkCCCC", dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "C", description: nil, URI: "http://example.com/c", tags: "", keyword: nil),
         ]
 
-        bookmarks.populateMirrorViaBuffer(records, atDate: mirrorDate)
+        bookmarks.populateMirrorViaBuffer(items: records, atDate: mirrorDate)
         bookmarks.wipeLocal()
 
         // Now the buffer is empty, and the mirror tree is what we expect.
@@ -570,13 +578,13 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         XCTAssertTrue(edgesBefore.buffer.isEmpty)
 
         // Set up the buffer.
-        let bufferDate = NSDate.now()
+        let bufferDate = Date.now()
         let changedBufferRecords = [
-            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["bookmarkCCCC"]),
-            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: ["folderAAAAAA"]),
-            BookmarkMirrorItem.folder("folderAAAAAA", modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: ["bookmarkBBBB", "bookmarkEEEE"]),
-            BookmarkMirrorItem.bookmark("bookmarkCCCC", modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "A", title: "C", description: nil, URI: "http://example.com/c", tags: "", keyword: nil),
-            BookmarkMirrorItem.bookmark("bookmarkEEEE", modified: bufferDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "E", description: nil, URI: "http://example.com/e", tags: "", keyword: nil),
+            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: ["bookmarkCCCC"]),
+            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: ["folderAAAAAA"]),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: ["bookmarkBBBB", "bookmarkEEEE"]),
+            BookmarkMirrorItem.bookmark("bookmarkCCCC", dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: BookmarkRoots.MenuFolderGUID, parentName: "A", title: "C", description: nil, URI: "http://example.com/c", tags: "", keyword: nil),
+            BookmarkMirrorItem.bookmark("bookmarkEEEE", dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "E", description: nil, URI: "http://example.com/e", tags: "", keyword: nil),
         ]
 
         bookmarks.applyRecords(changedBufferRecords).succeeded()
@@ -638,18 +646,18 @@ class TestBookmarkTreeMerging: FailFastTestCase {
     }
 
     func testApplyingTwoEmptyFoldersDoesntSmush() {
-        guard let bookmarks = self.getSyncableBookmarks("C") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "C") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
 
         // Insert two identical folders. We mark them with hasDupe because that's the Syncy
         // thing to do.
-        let now = NSDate.now()
+        let now = Date.now()
         let records = [
-            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: ["emptyempty01", "emptyempty02"]),
-            BookmarkMirrorItem.folder("emptyempty01", modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
-            BookmarkMirrorItem.folder("emptyempty02", modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, dateAdded: now, modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: ["emptyempty01", "emptyempty02"]),
+            BookmarkMirrorItem.folder("emptyempty01", dateAdded: now, modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
+            BookmarkMirrorItem.folder("emptyempty02", dateAdded: now, modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
         ]
 
         bookmarks.buffer.applyRecords(records).succeeded()
@@ -673,21 +681,21 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         XCTAssertEqual(BookmarkRoots.RootGUID, mergedTree.root.mirror?.recordGUID)
         XCTAssertNil(mergedTree.root.remote)
 
-        XCTAssertTrue(MergeState<BookmarkMirrorItem>.Unchanged == mergedTree.root.valueState)
-        XCTAssertTrue(MergeState<BookmarkTreeNode>.Unchanged == mergedTree.root.structureState)
+        XCTAssertTrue(MergeState<BookmarkMirrorItem>.unchanged == mergedTree.root.valueState)
+        XCTAssertTrue(MergeState<BookmarkTreeNode>.unchanged == mergedTree.root.structureState)
         XCTAssertEqual(4, mergedTree.root.mergedChildren?.count)
 
-        guard let mergedMobile = mergedTree.root.mergedChildren?[BookmarkRoots.RootChildren.indexOf(BookmarkRoots.MobileFolderGUID) ?? -1] else {
+        guard let mergedMobile = mergedTree.root.mergedChildren?[BookmarkRoots.RootChildren.index(of: BookmarkRoots.MobileFolderGUID) ?? -1] else {
             XCTFail("Didn't get a merged mobile folder.")
             return
         }
 
         XCTAssertEqual(BookmarkRoots.MobileFolderGUID, mergedMobile.guid)
-        XCTAssertTrue(MergeState<BookmarkMirrorItem>.Remote == mergedMobile.valueState)
+        XCTAssertTrue(MergeState<BookmarkMirrorItem>.remote == mergedMobile.valueState)
 
         // This ends up as Remote because we didn't change any of its structure
         // when compared to the incoming record.
-        guard case MergeState<BookmarkTreeNode>.Remote = mergedMobile.structureState else {
+        guard case MergeState<BookmarkTreeNode>.remote = mergedMobile.structureState else {
             XCTFail("Didn't get expected Remote state.")
             return
         }
@@ -705,10 +713,10 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         XCTAssertNotNil(empty02.remote)
         XCTAssertEqual("emptyempty01", empty01.remote!.recordGUID)
         XCTAssertEqual("emptyempty02", empty02.remote!.recordGUID)
-        XCTAssertTrue(MergeState<BookmarkTreeNode>.Remote == empty01.structureState)
-        XCTAssertTrue(MergeState<BookmarkTreeNode>.Remote == empty02.structureState)
-        XCTAssertTrue(MergeState<BookmarkMirrorItem>.Remote == empty01.valueState)
-        XCTAssertTrue(MergeState<BookmarkMirrorItem>.Remote == empty02.valueState)
+        XCTAssertTrue(MergeState<BookmarkTreeNode>.remote == empty01.structureState)
+        XCTAssertTrue(MergeState<BookmarkTreeNode>.remote == empty02.structureState)
+        XCTAssertTrue(MergeState<BookmarkMirrorItem>.remote == empty01.valueState)
+        XCTAssertTrue(MergeState<BookmarkMirrorItem>.remote == empty02.valueState)
         XCTAssertTrue(empty01.mergedChildren?.isEmpty ?? false)
         XCTAssertTrue(empty02.mergedChildren?.isEmpty ?? false)
 
@@ -719,7 +727,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         let uploader = MockUploader()
         let storer = uploader.getStorer()
-        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, greenLight: { true })
+        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         applier.applyResult(result).succeeded()
 
         guard let mirror = bookmarks.treeForMirror().value.successValue else {
@@ -743,7 +751,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
             return
         }
 
-        if case let .Folder(_, children) = mobile {
+        if case let .folder(_, children) = mobile {
             XCTAssertEqual(children.map { $0.recordGUID }, ["emptyempty01", "emptyempty02"])
         } else {
             XCTFail("Mobile isn't a folder.")
@@ -764,19 +772,19 @@ class TestBookmarkTreeMerging: FailFastTestCase {
      * weren't remotely present.
      */
     func testApplyingTwoEmptyFoldersMatchesOnlyOne() {
-        guard let bookmarks = self.getSyncableBookmarks("D") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "D") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
 
         // Insert three identical folders. We mark them with hasDupe because that's the Syncy
         // thing to do.
-        let now = NSDate.now()
+        let now = Date.now()
         let records = [
-            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: ["emptyempty01", "emptyempty02", "emptyempty03"]),
-            BookmarkMirrorItem.folder("emptyempty01", modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
-            BookmarkMirrorItem.folder("emptyempty02", modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
-            BookmarkMirrorItem.folder("emptyempty03", modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, dateAdded: now, modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: ["emptyempty01", "emptyempty02", "emptyempty03"]),
+            BookmarkMirrorItem.folder("emptyempty01", dateAdded: now, modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
+            BookmarkMirrorItem.folder("emptyempty02", dateAdded: now, modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
+            BookmarkMirrorItem.folder("emptyempty03", dateAdded: now, modified: now, hasDupe: true, parentID: BookmarkRoots.MobileFolderGUID, parentName: "Mobile Bookmarks", title: "Empty", description: "", children: []),
         ]
 
         bookmarks.buffer.validate().succeeded()                // It's valid! Empty.
@@ -788,15 +796,14 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         // Add one matching empty folder locally.
         // Add one by GUID, too. This is the most complex possible case.
-        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, title, parentid, parentName, sync_status, local_modified) VALUES ('emptyempty02', \(BookmarkNodeType.Folder.rawValue), 'Empty', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.Changed.rawValue), \(NSDate.now()))").succeeded()
-        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, title, parentid, parentName, sync_status, local_modified) VALUES ('emptyemptyL0', \(BookmarkNodeType.Folder.rawValue), 'Empty', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.New.rawValue), \(NSDate.now()))").succeeded()
+        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, date_added, title, parentid, parentName, sync_status, local_modified) VALUES ('emptyempty02', \(BookmarkNodeType.folder.rawValue), \(now), 'Empty', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.changed.rawValue), \(Date.now()))").succeeded()
+        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, date_added, title, parentid, parentName, sync_status, local_modified) VALUES ('emptyemptyL0', \(BookmarkNodeType.folder.rawValue), \(now), 'Empty', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.new.rawValue), \(Date.now()))").succeeded()
         bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocalStructure) (parent, child, idx) VALUES ('\(BookmarkRoots.MobileFolderGUID)', 'emptyempty02', 0)").succeeded()
         bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocalStructure) (parent, child, idx) VALUES ('\(BookmarkRoots.MobileFolderGUID)', 'emptyemptyL0', 1)").succeeded()
 
-
         let uploader = MockUploader()
         let storer = uploader.getStorer()
-        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, greenLight: { true })
+        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         applier.go().succeeded()
 
         guard let mirror = bookmarks.treeForMirror().value.successValue else {
@@ -837,7 +844,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
             return
         }
 
-        if case let .Folder(_, children) = mobile {
+        if case let .folder(_, children) = mobile {
             // This order isn't strictly specified, but try to preserve the remote order if we can.
             XCTAssertEqual(children.map { $0.recordGUID }, ["emptyempty01", "emptyempty02", "emptyempty03"])
         } else {
@@ -847,7 +854,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
     // TODO: this test should be extended to also exercise the case of a conflict.
     func testLocalRecordsKeepTheirFavicon() {
-        guard let bookmarks = self.getSyncableBookmarks("E") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "E") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
@@ -857,13 +864,13 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         bookmarks.buffer.db.assertQueryReturns("SELECT COUNT(*) FROM \(TableBookmarksLocal)", int: 5)
         bookmarks.buffer.db.assertQueryReturns("SELECT COUNT(*) FROM \(TableBookmarksLocalStructure)", int: 4)
 
-        bookmarks.local.db.run("INSERT INTO \(TableFavicons) (id, url, width, height, type, date) VALUES (11, 'http://example.org/favicon.ico', 16, 16, 0, \(NSDate.now()))").succeeded()
-        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, title, parentid, parentName, sync_status, bmkUri, faviconID) VALUES ('somebookmark', \(BookmarkNodeType.Bookmark.rawValue), 'Some Bookmark', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.New.rawValue), 'http://example.org/', 11)").succeeded()
+        bookmarks.local.db.run("INSERT INTO \(TableFavicons) (id, url, width, height, type, date) VALUES (11, 'http://example.org/favicon.ico', 16, 16, 0, \(Date.now()))").succeeded()
+        bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocal) (guid, type, date_added, title, parentid, parentName, sync_status, bmkUri, faviconID) VALUES ('somebookmark', \(BookmarkNodeType.bookmark.rawValue), \(Date.now()), 'Some Bookmark', '\(BookmarkRoots.MobileFolderGUID)', 'Mobile Bookmarks', \(SyncStatus.new.rawValue), 'http://example.org/', 11)").succeeded()
         bookmarks.local.db.run("INSERT INTO \(TableBookmarksLocalStructure) (parent, child, idx) VALUES ('\(BookmarkRoots.MobileFolderGUID)', 'somebookmark', 0)").succeeded()
 
         let uploader = MockUploader()
         let storer = uploader.getStorer()
-        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, greenLight: { true })
+        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         applier.go().succeeded()
 
         // After merge, the buffer and local are empty.
@@ -885,32 +892,32 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         XCTAssertFalse(uploader.added.contains(BookmarkRoots.RootGUID))
 
         // Their parent IDs are translated.
-        XCTAssertEqual(uploader.records["mobile"]?.payload["parentid"].asString, "places")
-        XCTAssertEqual(uploader.records["somebookmark"]?.payload["parentid"].asString, "mobile")
+        XCTAssertEqual(uploader.records["mobile"]?.payload["parentid"].string, "places")
+        XCTAssertEqual(uploader.records["somebookmark"]?.payload["parentid"].string, "mobile")
 
         XCTAssertTrue(uploader.deletions.isEmpty)
 
         // The record looks sane.
         let bm = uploader.records["somebookmark"]!
-        XCTAssertEqual("bookmark", bm.payload["type"].asString)
-        XCTAssertEqual("Some Bookmark", bm.payload["title"].asString)
+        XCTAssertEqual("bookmark", bm.payload["type"].string)
+        XCTAssertEqual("Some Bookmark", bm.payload["title"].string)
 
         // New record still has its icon ID in the local DB.
         bookmarks.local.db.assertQueryReturns("SELECT faviconID FROM \(TableBookmarksMirror) WHERE bmkUri = 'http://example.org/'", int: 11)
     }
 
     func testRemoteValueOnlyChange() {
-        guard let bookmarks = self.getSyncableBookmarks("F") else {
+        guard let bookmarks = self.getSyncableBookmarks(name: "F") else {
             XCTFail("Couldn't get bookmarks.")
             return
         }
 
         // Insert one folder and one child.
-        let now = NSDate.now()
+        let now = Date.now()
         let records = [
-            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: ["folderAAAAAA"]),
-            BookmarkMirrorItem.folder("folderAAAAAA", modified: now, hasDupe: false, parentID: BookmarkRoots.UnfiledFolderGUID, parentName: "Unsorted Bookmarks", title: "Folder A", description: "", children: ["bookmarkBBBB"]),
-            BookmarkMirrorItem.bookmark("bookmarkBBBB", modified: now, hasDupe: false, parentID: "folderAAAAAA", parentName: "Folder A", title: "Initial Title", description: "No desc.", URI: "http://example.org/foo", tags: "", keyword: nil),
+            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, dateAdded: Date.now(), modified: now, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: ["folderAAAAAA"]),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: now, modified: now, hasDupe: false, parentID: BookmarkRoots.UnfiledFolderGUID, parentName: "Unsorted Bookmarks", title: "Folder A", description: "", children: ["bookmarkBBBB"]),
+            BookmarkMirrorItem.bookmark("bookmarkBBBB", dateAdded: now, modified: now, hasDupe: false, parentID: "folderAAAAAA", parentName: "Folder A", title: "Initial Title", description: "No desc.", URI: "http://example.org/foo", tags: "", keyword: nil),
         ]
 
         bookmarks.buffer.validate().succeeded()                // It's valid! Empty.
@@ -922,7 +929,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         let uploader = MockUploader()
         let storer = uploader.getStorer()
-        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, greenLight: { true })
+        let applier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: storer, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         applier.go().succeeded()
 
         guard let _ = bookmarks.treeForMirror().value.successValue else {
@@ -943,7 +950,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         // Now process an incoming change.
         let changed = [
-            BookmarkMirrorItem.bookmark("bookmarkBBBB", modified: now, hasDupe: false, parentID: "folderAAAAAA", parentName: "Folder A", title: "New Title", description: "No desc.", URI: "http://example.org/foo", tags: "", keyword: nil),
+            BookmarkMirrorItem.bookmark("bookmarkBBBB", dateAdded: now, modified: now, hasDupe: false, parentID: "folderAAAAAA", parentName: "Folder A", title: "New Title", description: "No desc.", URI: "http://example.org/foo", tags: "", keyword: nil),
         ]
 
         bookmarks.buffer.validate().succeeded()                // It's valid! Empty.
@@ -955,7 +962,7 @@ class TestBookmarkTreeMerging: FailFastTestCase {
 
         let uu = MockUploader()
         let ss = uu.getStorer()
-        let changeApplier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: ss, greenLight: { true })
+        let changeApplier = MergeApplier(buffer: bookmarks, storage: bookmarks, client: ss, statsSession: mockStatsSessionForBookmarks(), greenLight: { true })
         changeApplier.go().succeeded()
 
         // The title changed.
@@ -967,16 +974,88 @@ class TestBookmarkTreeMerging: FailFastTestCase {
         bookmarks.buffer.db.assertQueryReturns("SELECT COUNT(*) FROM \(TableBookmarksBuffer)", int: 0)
         bookmarks.buffer.db.assertQueryReturns("SELECT COUNT(*) FROM \(TableBookmarksBufferStructure)", int: 0)
     }
+
+    func testMergeDateAdded() {
+        guard let bookmarks = self.getSyncableBookmarks(name: "H") else {
+            XCTFail("Couldn't get bookmarks.")
+            return
+        }
+
+        // Set up the mirror.
+        let mirrorDate = Date.now() - 100000
+        let records = [
+            BookmarkMirrorItem.folder(BookmarkRoots.RootGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "", description: "", children: BookmarkRoots.RootChildren),
+            BookmarkMirrorItem.folder(BookmarkRoots.MenuFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Menu", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.UnfiledFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Unsorted Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder(BookmarkRoots.ToolbarFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Bookmarks Toolbar", description: "", children: ["folderAAAAAA"]),
+            BookmarkMirrorItem.folder(BookmarkRoots.MobileFolderGUID, dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.RootGUID, parentName: "", title: "Mobile Bookmarks", description: "", children: []),
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: []),
+        ]
+
+        bookmarks.populateMirrorViaBuffer(items: records, atDate: mirrorDate)
+        bookmarks.wipeLocal()
+
+        // Now the buffer is empty, and the mirror tree is what we expect.
+        let mirrorTree = bookmarks.treeForMirror().value.successValue!
+        XCTAssertFalse(mirrorTree.isEmpty)
+
+        XCTAssertEqual(mirrorTree.lookup.keys.count, 6)
+        XCTAssertEqual(1, mirrorTree.subtrees.count)
+
+        let edgesBefore = bookmarks.treesForEdges().value.successValue!
+        XCTAssertTrue(edgesBefore.local.isEmpty)      // Because we're fully synced.
+        XCTAssertTrue(edgesBefore.buffer.isEmpty)
+
+        // Make local changes.
+        bookmarks.local.insertBookmark("http://example.com/f".asURL!, title: "F", favicon: nil, intoFolder: "folderAAAAAA", withTitle: "A").succeeded()
+        let insertedGUID = bookmarks.local.db.getGUIDs("SELECT guid FROM \(TableBookmarksLocal) WHERE title IS 'F'")[0]
+        bookmarks.local.insertBookmark("http://example.com/g".asURL!, title: "G", favicon: nil, intoFolder: "folderAAAAAA", withTitle: "A").succeeded()
+        let insertedGUID2 = bookmarks.local.db.getGUIDs("SELECT guid FROM \(TableBookmarksLocal) WHERE title IS 'G'")[0]
+
+        // Set up the buffer.
+        let bufferDate = Date.now() - 100000
+        let dateAfter = Date.now()
+        let changedBufferRecords = [
+            BookmarkMirrorItem.folder("folderAAAAAA", dateAdded: mirrorDate, modified: mirrorDate, hasDupe: false, parentID: BookmarkRoots.ToolbarFolderGUID, parentName: "Bookmarks Toolbar", title: "A", description: "", children: [insertedGUID, insertedGUID2]),
+            BookmarkMirrorItem.bookmark(insertedGUID, dateAdded: bufferDate, modified: bufferDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "F", description: nil, URI: "http://example.com/f", tags: "", keyword: nil),
+            BookmarkMirrorItem.bookmark(insertedGUID2, dateAdded: dateAfter, modified: bufferDate, hasDupe: false, parentID: "folderAAAAAA", parentName: "A", title: "G", description: nil, URI: "http://example.com/g", tags: "", keyword: nil),
+            ]
+
+        bookmarks.applyRecords(changedBufferRecords).succeeded()
+
+        // Now merge.
+        let storageMerger = ThreeWayBookmarksStorageMerger(buffer: bookmarks, storage: bookmarks)
+        let merger = storageMerger.getMerger().value.successValue!
+        guard let mergedTree = merger.produceMergedTree().value.successValue else {
+            XCTFail("Couldn't get merge result.")
+            return
+        }
+
+        mergedTree.dump()
+
+        let folderChildren = mergedTree.root.mergedChildren!.find{ $0.guid == BookmarkRoots.ToolbarFolderGUID }!.mergedChildren!.find { $0.guid == "folderAAAAAA" }!.mergedChildren!
+
+        if case .new(let value) = folderChildren[0].valueState {
+            XCTAssertEqual(value.dateAdded, bufferDate)
+        } else {
+            XCTFail()
+        }
+
+        guard case .local = folderChildren[1].valueState else {
+            XCTFail()
+            return
+        }
+    }
 }
 
 class TestMergedTree: FailFastTestCase {
     func testInitialState() {
-        let children = BookmarkRoots.RootChildren.map { BookmarkTreeNode.Unknown(guid: $0) }
-        let root = BookmarkTreeNode.Folder(guid: BookmarkRoots.RootGUID, children: children)
+        let children = BookmarkRoots.RootChildren.map { BookmarkTreeNode.unknown(guid: $0) }
+        let root = BookmarkTreeNode.folder(guid: BookmarkRoots.RootGUID, children: children)
         let tree = MergedTree(mirrorRoot: root)
         XCTAssertTrue(tree.root.hasDecidedChildren)
 
-        if case let .Folder(guid, unmergedChildren) = tree.root.asUnmergedTreeNode() {
+        if case let .folder(guid, unmergedChildren) = tree.root.asUnmergedTreeNode() {
             XCTAssertEqual(guid, BookmarkRoots.RootGUID)
             XCTAssertEqual(unmergedChildren, children)
         } else {
@@ -988,7 +1067,7 @@ class TestMergedTree: FailFastTestCase {
         XCTAssertTrue(tree.root.asMergedTreeNode().isUnknown)
 
         // Simulate a merge.
-        let mergedRoots = children.map { MergedTreeNode(guid: $0.recordGUID, mirror: $0, structureState: MergeState.Unchanged) }
+        let mergedRoots = children.map { MergedTreeNode(guid: $0.recordGUID, mirror: $0, structureState: MergeState.unchanged) }
         tree.root.mergedChildren = mergedRoots
 
         // Now we have processed children.
@@ -1009,7 +1088,7 @@ private extension MergedSQLiteBookmarks {
             "('\(BookmarkRoots.RootGUID)', '\(BookmarkRoots.ToolbarFolderGUID)', 1),",
             "('\(BookmarkRoots.RootGUID)', '\(BookmarkRoots.UnfiledFolderGUID)', 2),",
             "('\(BookmarkRoots.RootGUID)', '\(BookmarkRoots.MobileFolderGUID)', 3)",
-        ].joinWithSeparator(" ")).succeeded()
+        ].joined(separator: " ")).succeeded()
 
         // Move it all to the mirror.
         self.local.db.moveBufferToMirrorForTesting()

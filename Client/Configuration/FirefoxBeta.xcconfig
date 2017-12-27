@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-MOZ_BUNDLE_DISPLAY_NAME = Firefox β
+MOZ_BUNDLE_DISPLAY_NAME = Firefox Beta
 
 // Bundle Identifier
 MOZ_BUNDLE_ID = org.mozilla.ios.FirefoxBeta
@@ -12,5 +12,9 @@ INCLUDE_SETTINGS_BUNDLE = NO
 
 // Adjust SDK Variables
 ADJUST_ENVIRONMENT =
-
 ADJUST_APP_TOKEN =
+
+// Leanplum SDK Variables
+LEANPLUM_ENVIRONMENT =
+LEANPLUM_APP_ID =
+LEANPLUM_KEY =

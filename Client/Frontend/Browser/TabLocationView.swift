@@ -11,37 +11,22 @@ import XCGLogger
 private let log = Logger.browserLogger
 
 protocol TabLocationViewDelegate {
-    func tabLocationViewDidTapLocation(tabLocationView: TabLocationView)
-    func tabLocationViewDidLongPressLocation(tabLocationView: TabLocationView)
-    func tabLocationViewDidTapReaderMode(tabLocationView: TabLocationView)
+    func tabLocationViewDidTapLocation(_ tabLocationView: TabLocationView)
+    func tabLocationViewDidLongPressLocation(_ tabLocationView: TabLocationView)
+    func tabLocationViewDidTapReaderMode(_ tabLocationView: TabLocationView)
+    func tabLocationViewDidTapPageOptions(_ tabLocationView: TabLocationView, from button: UIButton)
+    func tabLocationViewDidLongPressPageOptions(_ tabLocationVIew: TabLocationView)
+    
     /// - returns: whether the long-press was handled by the delegate; i.e. return `false` when the conditions for even starting handling long-press were not satisfied
-    func tabLocationViewDidLongPressReaderMode(tabLocationView: TabLocationView) -> Bool
-    func tabLocationViewLocationAccessibilityActions(tabLocationView: TabLocationView) -> [UIAccessibilityCustomAction]?
+    @discardableResult func tabLocationViewDidLongPressReaderMode(_ tabLocationView: TabLocationView) -> Bool
+    func tabLocationViewLocationAccessibilityActions(_ tabLocationView: TabLocationView) -> [UIAccessibilityCustomAction]?
 }
 
-struct TabLocationViewUX {
-    static let HostFontColor = UIColor.blackColor()
-    static let BaseURLFontColor = UIColor.grayColor()
-    static let BaseURLPitch = 0.75
-    static let HostPitch = 1.0
+private struct TabLocationViewUX {
+    static let HostFontColor = UIColor.black
+    static let BaseURLFontColor = UIColor.gray
     static let LocationContentInset = 8
-
-    static let Themes: [String: Theme] = {
-        var themes = [String: Theme]()
-        var theme = Theme()
-        theme.URLFontColor = UIColor.lightGrayColor()
-        theme.hostFontColor = UIColor.whiteColor()
-        theme.backgroundColor = UIConstants.PrivateModeLocationBackgroundColor
-        themes[Theme.PrivateMode] = theme
-
-        theme = Theme()
-        theme.URLFontColor = BaseURLFontColor
-        theme.hostFontColor = HostFontColor
-        theme.backgroundColor = UIColor.whiteColor()
-        themes[Theme.NormalMode] = theme
-
-        return themes
-    }()
+    static let URLBarPadding = 4
 }
 
 class TabLocationView: UIView {
@@ -53,18 +38,15 @@ class TabLocationView: UIView {
         didSet { updateTextWithURL() }
     }
 
-    dynamic var hostFontColor: UIColor = TabLocationViewUX.HostFontColor {
-        didSet { updateTextWithURL() }
-    }
-
-    var url: NSURL? {
+    var url: URL? {
         didSet {
-            let wasHidden = lockImageView.hidden
-            lockImageView.hidden = url?.scheme != "https"
-            if wasHidden != lockImageView.hidden {
+            let wasHidden = lockImageView.isHidden
+            lockImageView.isHidden = url?.scheme != "https"
+            if wasHidden != lockImageView.isHidden {
                 UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil)
             }
             updateTextWithURL()
+            pageOptionsButton.isHidden = (url == nil)
             setNeedsUpdateConstraints()
         }
     }
@@ -75,14 +57,21 @@ class TabLocationView: UIView {
         }
         set (newReaderModeState) {
             if newReaderModeState != self.readerModeButton.readerModeState {
-                let wasHidden = readerModeButton.hidden
+                let wasHidden = readerModeButton.isHidden
                 self.readerModeButton.readerModeState = newReaderModeState
-                readerModeButton.hidden = (newReaderModeState == ReaderModeState.Unavailable)
-                if wasHidden != readerModeButton.hidden {
+                readerModeButton.isHidden = (newReaderModeState == ReaderModeState.unavailable)
+                separatorLine.isHidden = readerModeButton.isHidden
+                if wasHidden != readerModeButton.isHidden {
                     UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil)
+                    if !readerModeButton.isHidden {
+                        // Delay the Reader Mode accessibility announcement briefly to prevent interruptions.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(2)) {
+                            UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, Strings.ReaderModeAvailableVoiceOverAnnouncement)
+                        }
+                    }
                 }
-                UIView.animateWithDuration(0.1, animations: { () -> Void in
-                    if newReaderModeState == ReaderModeState.Unavailable {
+                UIView.animate(withDuration: 0.1, animations: { () -> Void in
+                    if newReaderModeState == ReaderModeState.unavailable {
                         self.readerModeButton.alpha = 0.0
                     } else {
                         self.readerModeButton.alpha = 1.0
@@ -96,7 +85,7 @@ class TabLocationView: UIView {
 
     lazy var placeholder: NSAttributedString = {
         let placeholderText = NSLocalizedString("Search or enter address", comment: "The text shown in the URL bar on about:home")
-        return NSAttributedString(string: placeholderText, attributes: [NSForegroundColorAttributeName: UIColor.grayColor()])
+        return NSAttributedString(string: placeholderText, attributes: [NSForegroundColorAttributeName: UIColor.gray])
     }()
 
     lazy var urlTextField: UITextField = {
@@ -108,33 +97,57 @@ class TabLocationView: UIView {
         urlTextField.addGestureRecognizer(self.tapRecognizer)
 
         // Prevent the field from compressing the toolbar buttons on the 4S in landscape.
-        urlTextField.setContentCompressionResistancePriority(250, forAxis: UILayoutConstraintAxis.Horizontal)
-
+        urlTextField.setContentCompressionResistancePriority(250, for: UILayoutConstraintAxis.horizontal)
         urlTextField.attributedPlaceholder = self.placeholder
         urlTextField.accessibilityIdentifier = "url"
         urlTextField.accessibilityActionsSource = self
         urlTextField.font = UIConstants.DefaultChromeFont
+        urlTextField.backgroundColor = .clear
         return urlTextField
     }()
 
-    private lazy var lockImageView: UIImageView = {
-        let lockImageView = UIImageView(image: UIImage(named: "lock_verified.png"))
-        lockImageView.hidden = true
+    fileprivate lazy var lockImageView: UIImageView = {
+        let lockImageView = UIImageView(image: UIImage.templateImageNamed("lock_verified"))
+        lockImageView.isHidden = true
+        lockImageView.tintColor = UIColor.Defaults.LockGreen
         lockImageView.isAccessibilityElement = true
-        lockImageView.contentMode = UIViewContentMode.Center
+        lockImageView.contentMode = UIViewContentMode.center
         lockImageView.accessibilityLabel = NSLocalizedString("Secure connection", comment: "Accessibility label for the lock icon, which is only present if the connection is secure")
         return lockImageView
     }()
 
-    private lazy var readerModeButton: ReaderModeButton = {
-        let readerModeButton = ReaderModeButton(frame: CGRectZero)
-        readerModeButton.hidden = true
-        readerModeButton.addTarget(self, action: #selector(TabLocationView.SELtapReaderModeButton), forControlEvents: .TouchUpInside)
+    fileprivate lazy var readerModeButton: ReaderModeButton = {
+        let readerModeButton = ReaderModeButton(frame: CGRect.zero)
+        readerModeButton.isHidden = true
+        readerModeButton.addTarget(self, action: #selector(TabLocationView.SELtapReaderModeButton), for: .touchUpInside)
         readerModeButton.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(TabLocationView.SELlongPressReaderModeButton(_:))))
         readerModeButton.isAccessibilityElement = true
+        readerModeButton.imageView?.contentMode = UIViewContentMode.scaleAspectFit
         readerModeButton.accessibilityLabel = NSLocalizedString("Reader View", comment: "Accessibility label for the Reader View button")
+        readerModeButton.accessibilityIdentifier = "TabLocationView.readerModeButton"
         readerModeButton.accessibilityCustomActions = [UIAccessibilityCustomAction(name: NSLocalizedString("Add to Reading List", comment: "Accessibility label for action adding current page to reading list."), target: self, selector: #selector(TabLocationView.SELreaderModeCustomAction))]
         return readerModeButton
+    }()
+    
+    lazy var pageOptionsButton: ToolbarButton = {
+        let pageOptionsButton = ToolbarButton(frame: CGRect.zero)
+        pageOptionsButton.setImage(UIImage.templateImageNamed("menu-More-Options"), for: .normal)
+        pageOptionsButton.isHidden = true
+        pageOptionsButton.addTarget(self, action: #selector(TabLocationView.SELDidPressPageOptionsButton), for: .touchUpInside)
+        pageOptionsButton.isAccessibilityElement = true
+        pageOptionsButton.imageView?.contentMode = .center
+        pageOptionsButton.accessibilityLabel = NSLocalizedString("Page Options Menu", comment: "Accessibility label for the Page Options menu button")
+        pageOptionsButton.accessibilityIdentifier = "TabLocationView.pageOptionsButton"
+        let longPressGesture = UILongPressGestureRecognizer(target: self, action: #selector(TabLocationView.SELDidLongPressPageOptionsButton))
+        pageOptionsButton.addGestureRecognizer(longPressGesture)
+        return pageOptionsButton
+    }()
+    
+    lazy var separatorLine: UIView = {
+        let line = UIView()
+        line.layer.cornerRadius = 2
+        line.isHidden = true
+        return line
     }()
 
     override init(frame: CGRect) {
@@ -146,21 +159,39 @@ class TabLocationView: UIView {
         addSubview(urlTextField)
         addSubview(lockImageView)
         addSubview(readerModeButton)
+        addSubview(pageOptionsButton)
+        addSubview(separatorLine)
 
-        lockImageView.snp_makeConstraints { make in
-            make.leading.centerY.equalTo(self)
-            make.width.equalTo(self.lockImageView.intrinsicContentSize().width + CGFloat(TabLocationViewUX.LocationContentInset * 2))
+        lockImageView.snp.makeConstraints { make in
+            make.size.equalTo(24)
+            make.centerY.equalTo(self)
+            make.leading.equalTo(self).offset(9)
         }
 
-        readerModeButton.snp_makeConstraints { make in
-            make.trailing.centerY.equalTo(self)
-            make.width.equalTo(self.readerModeButton.intrinsicContentSize().width + CGFloat(TabLocationViewUX.LocationContentInset * 2))
+        pageOptionsButton.snp.makeConstraints { make in
+            make.centerY.equalTo(self)
+            make.trailing.equalTo(self)
+            make.width.equalTo(44)
+            make.height.equalTo(self)
+        }
+        
+        separatorLine.snp.makeConstraints { make in
+            make.width.equalTo(1)
+            make.height.equalTo(26)
+            make.trailing.equalTo(pageOptionsButton.snp.leading)
+            make.centerY.equalTo(self)
+        }
+        
+        readerModeButton.snp.makeConstraints { make in
+            make.centerY.equalTo(self)
+            make.trailing.equalTo(separatorLine.snp.leading).offset(-9)
+            make.size.equalTo(24)
         }
     }
 
-    override var accessibilityElements: [AnyObject]! {
+    override var accessibilityElements: [Any]? {
         get {
-            return [lockImageView, urlTextField, readerModeButton].filter { !$0.hidden }
+            return [lockImageView, urlTextField, readerModeButton, pageOptionsButton].filter { !$0.isHidden }
         }
         set {
             super.accessibilityElements = newValue
@@ -172,19 +203,19 @@ class TabLocationView: UIView {
     }
 
     override func updateConstraints() {
-        urlTextField.snp_remakeConstraints { make in
+        urlTextField.snp.remakeConstraints { make in
             make.top.bottom.equalTo(self)
 
-            if lockImageView.hidden {
+            if lockImageView.isHidden {
                 make.leading.equalTo(self).offset(TabLocationViewUX.LocationContentInset)
             } else {
-                make.leading.equalTo(self.lockImageView.snp_trailing)
+                make.leading.equalTo(self.lockImageView.snp.trailing).offset(TabLocationViewUX.URLBarPadding)
             }
 
-            if readerModeButton.hidden {
-                make.trailing.equalTo(self).offset(-TabLocationViewUX.LocationContentInset)
+            if readerModeButton.isHidden {
+                make.trailing.equalTo(self.pageOptionsButton.snp.leading).offset(-TabLocationViewUX.URLBarPadding)
             } else {
-                make.trailing.equalTo(self.readerModeButton.snp_leading)
+                make.trailing.equalTo(self.readerModeButton.snp.leading).offset(-TabLocationViewUX.URLBarPadding)
             }
         }
 
@@ -195,19 +226,27 @@ class TabLocationView: UIView {
         delegate?.tabLocationViewDidTapReaderMode(self)
     }
 
-    func SELlongPressReaderModeButton(recognizer: UILongPressGestureRecognizer) {
-        if recognizer.state == UIGestureRecognizerState.Began {
+    func SELlongPressReaderModeButton(_ recognizer: UILongPressGestureRecognizer) {
+        if recognizer.state == UIGestureRecognizerState.began {
             delegate?.tabLocationViewDidLongPressReaderMode(self)
         }
     }
+    
+    func SELDidPressPageOptionsButton(_ button: UIButton) {
+        delegate?.tabLocationViewDidTapPageOptions(self, from: button)
+    }
+    
+    func SELDidLongPressPageOptionsButton(_ recognizer: UILongPressGestureRecognizer) {
+        delegate?.tabLocationViewDidLongPressPageOptions(self)
+    }
 
-    func SELlongPressLocation(recognizer: UITapGestureRecognizer) {
-        if recognizer.state == UIGestureRecognizerState.Began {
+    func SELlongPressLocation(_ recognizer: UITapGestureRecognizer) {
+        if recognizer.state == UIGestureRecognizerState.began {
             delegate?.tabLocationViewDidLongPressLocation(self)
         }
     }
 
-    func SELtapLocation(recognizer: UITapGestureRecognizer) {
+    func SELtapLocation(_ recognizer: UITapGestureRecognizer) {
         delegate?.tabLocationViewDidTapLocation(self)
     }
 
@@ -215,40 +254,32 @@ class TabLocationView: UIView {
         return delegate?.tabLocationViewDidLongPressReaderMode(self) ?? false
     }
 
-    private func updateTextWithURL() {
-        if let httplessURL = url?.absoluteDisplayString(), let baseDomain = url?.baseDomain() {
-            // Highlight the base domain of the current URL.
-            let attributedString = NSMutableAttributedString(string: httplessURL)
-            let nsRange = NSMakeRange(0, httplessURL.characters.count)
-            attributedString.addAttribute(NSForegroundColorAttributeName, value: baseURLFontColor, range: nsRange)
-            attributedString.colorSubstring(baseDomain, withColor: hostFontColor)
-            attributedString.addAttribute(UIAccessibilitySpeechAttributePitch, value: NSNumber(double: TabLocationViewUX.BaseURLPitch), range: nsRange)
-            attributedString.pitchSubstring(baseDomain, withPitch: TabLocationViewUX.HostPitch)
-            urlTextField.attributedText = attributedString
+    fileprivate func updateTextWithURL() {
+        if let host = url?.host, AppConstants.MOZ_PUNYCODE {
+            urlTextField.text = url?.absoluteString.replacingOccurrences(of: host, with: host.asciiHostToUTF8())
         } else {
-            // If we're unable to highlight the domain, just use the URL as is.
-            if let host = url?.host {
-                urlTextField.text = url?.absoluteString?.stringByReplacingOccurrencesOfString(host, withString: host.asciiHostToUTF8())
-            } else {
-                urlTextField.text = url?.absoluteString
-            }
+            urlTextField.text = url?.absoluteString
+        }
+        // remove https:// (the scheme) from the url when displaying
+        if let scheme = url?.scheme, let range = url?.absoluteString.range(of: "\(scheme)://") {
+            urlTextField.text = url?.absoluteString.replacingCharacters(in: range, with: "")
         }
     }
 }
 
 extension TabLocationView: UIGestureRecognizerDelegate {
-    func gestureRecognizer(gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWithGestureRecognizer otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         return true
     }
 
-    func gestureRecognizer(gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailByGestureRecognizer otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         // If the longPressRecognizer is active, fail all other recognizers to avoid conflicts.
         return gestureRecognizer == longPressRecognizer
     }
 }
 
 extension TabLocationView: AccessibilityActionsSource {
-    func accessibilityCustomActionsForView(view: UIView) -> [UIAccessibilityCustomAction]? {
+    func accessibilityCustomActionsForView(_ view: UIView) -> [UIAccessibilityCustomAction]? {
         if view === urlTextField {
             return delegate?.tabLocationViewLocationAccessibilityActions(self)
         }
@@ -257,29 +288,51 @@ extension TabLocationView: AccessibilityActionsSource {
 }
 
 extension TabLocationView: Themeable {
-    func applyTheme(themeName: String) {
-        guard let theme = TabLocationViewUX.Themes[themeName] else {
-            log.error("Unable to apply unknown theme \(themeName)")
-            return
-        }
-        baseURLFontColor = theme.URLFontColor!
-        hostFontColor = theme.hostFontColor!
-        backgroundColor = theme.backgroundColor
+    func applyTheme(_ theme: Theme) {
+        backgroundColor = UIColor.TextField.Background.colorFor(theme)
+        urlTextField.textColor = UIColor.Browser.Tint.colorFor(theme)
+        readerModeButton.selectedTintColor = UIColor.TextField.ReaderModeButtonSelected.colorFor(theme)
+        readerModeButton.unselectedTintColor = UIColor.TextField.ReaderModeButtonUnselected.colorFor(theme)
+        
+        pageOptionsButton.selectedTintColor = UIColor.TextField.PageOptionsSelected.colorFor(theme)
+        pageOptionsButton.unselectedTintColor = UIColor.TextField.PageOptionsUnselected.colorFor(theme)
+        pageOptionsButton.tintColor = pageOptionsButton.unselectedTintColor
+        separatorLine.backgroundColor = UIColor.TextField.Separator.colorFor(theme)
     }
 }
 
-private class ReaderModeButton: UIButton {
+class ReaderModeButton: UIButton {
+    var selectedTintColor: UIColor?
+    var unselectedTintColor: UIColor?
     override init(frame: CGRect) {
         super.init(frame: frame)
-        setImage(UIImage(named: "reader.png"), forState: UIControlState.Normal)
-        setImage(UIImage(named: "reader_active.png"), forState: UIControlState.Selected)
+        adjustsImageWhenHighlighted = false
+        setImage(UIImage.templateImageNamed("reader"), for: .normal)
     }
     
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
     
-    var _readerModeState: ReaderModeState = ReaderModeState.Unavailable
+    override var isSelected: Bool {
+        didSet {
+            self.tintColor = (isHighlighted || isSelected) ? selectedTintColor : unselectedTintColor
+        }
+    }
+
+    override open var isHighlighted: Bool {
+        didSet {
+            self.tintColor = (isHighlighted || isSelected) ? selectedTintColor : unselectedTintColor
+        }
+    }
+
+    override var tintColor: UIColor! {
+        didSet {
+            self.imageView?.tintColor = self.tintColor
+        }
+    }
+    
+    var _readerModeState: ReaderModeState = ReaderModeState.unavailable
     
     var readerModeState: ReaderModeState {
         get {
@@ -288,15 +341,15 @@ private class ReaderModeButton: UIButton {
         set (newReaderModeState) {
             _readerModeState = newReaderModeState
             switch _readerModeState {
-            case .Available:
-                self.enabled = true
-                self.selected = false
-            case .Unavailable:
-                self.enabled = false
-                self.selected = false
-            case .Active:
-                self.enabled = true
-                self.selected = true
+            case .available:
+                self.isEnabled = true
+                self.isSelected = false
+            case .unavailable:
+                self.isEnabled = false
+                self.isSelected = false
+            case .active:
+                self.isEnabled = true
+                self.isSelected = true
             }
         }
     }
@@ -314,7 +367,7 @@ private class DisplayTextField: UITextField {
         }
     }
 
-    private override func canBecomeFirstResponder() -> Bool {
+    fileprivate override var canBecomeFirstResponder: Bool {
         return false
     }
 }

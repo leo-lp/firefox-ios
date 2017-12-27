@@ -12,123 +12,148 @@ import Sync
 import XCTest
 import Deferred
 
-public class MockSyncManager: SyncManager {
-    public var isSyncing = false
-    public var lastSyncFinishTime: Timestamp? = nil
-    public var syncDisplayState: SyncDisplayState?
+open class MockSyncManager: SyncManager {
+    open var isSyncing = false
+    open var lastSyncFinishTime: Timestamp?
+    open var syncDisplayState: SyncDisplayState?
 
-    public func hasSyncedHistory() -> Deferred<Maybe<Bool>> {
+    open func hasSyncedHistory() -> Deferred<Maybe<Bool>> {
         return deferMaybe(true)
     }
 
-    public func syncClients() -> SyncResult { return deferMaybe(.Completed) }
-    public func syncClientsThenTabs() -> SyncResult { return deferMaybe(.Completed) }
-    public func syncHistory() -> SyncResult { return deferMaybe(.Completed) }
-    public func syncLogins() -> SyncResult { return deferMaybe(.Completed) }
-    public func syncEverything() -> Success {
+    private func completedWithStats(collection: String) -> Deferred<Maybe<SyncStatus>> {
+        return deferMaybe(SyncStatus.completed(SyncEngineStatsSession(collection: collection)))
+    }
+    
+    open func syncClients() -> SyncResult { return completedWithStats(collection: "mock_clients") }
+    open func syncClientsThenTabs() -> SyncResult { return completedWithStats(collection: "mock_clientsandtabs") }
+    open func syncHistory() -> SyncResult { return completedWithStats(collection: "mock_history") }
+    open func syncLogins() -> SyncResult { return completedWithStats(collection: "mock_logins") }
+    open func mirrorBookmarks() -> SyncResult { return completedWithStats(collection: "mock_bookmarks") }
+    open func syncEverything(why: SyncReason) -> Success {
         return succeed()
     }
-
-    public func beginTimedSyncs() {}
-    public func endTimedSyncs() {}
-    public func applicationDidBecomeActive() {
+    open func syncNamedCollections(why: SyncReason, names: [String]) -> Success {
+        return succeed()
+    }
+    open func beginTimedSyncs() {}
+    open func endTimedSyncs() {}
+    open func applicationDidBecomeActive() {
         self.beginTimedSyncs()
     }
-    public func applicationDidEnterBackground() {
+    open func applicationDidEnterBackground() {
         self.endTimedSyncs()
     }
 
-    public func onNewProfile() {
+    open func onNewProfile() {
     }
 
-    public func onAddedAccount() -> Success {
+    open func onAddedAccount() -> Success {
         return succeed()
     }
-    public func onRemovedAccount(account: FirefoxAccount?) -> Success {
+    open func onRemovedAccount(_ account: FirefoxAccount?) -> Success {
         return succeed()
     }
 
-    public func hasSyncedLogins() -> Deferred<Maybe<Bool>> {
+    open func hasSyncedLogins() -> Deferred<Maybe<Bool>> {
         return deferMaybe(true)
     }
 }
 
-public class MockTabQueue: TabQueue {
-    public func addToQueue(tab: ShareItem) -> Success {
+open class MockTabQueue: TabQueue {
+    open func addToQueue(_ tab: ShareItem) -> Success {
         return succeed()
     }
 
-    public func getQueuedTabs() -> Deferred<Maybe<Cursor<ShareItem>>> {
+    open func getQueuedTabs() -> Deferred<Maybe<Cursor<ShareItem>>> {
         return deferMaybe(ArrayCursor<ShareItem>(data: []))
     }
 
-    public func clearQueuedTabs() -> Success {
+    open func clearQueuedTabs() -> Success {
         return succeed()
     }
 }
 
-public class MockProfile: Profile {
-    private let name: String = "mockaccount"
+open class MockPanelDataObservers: PanelDataObservers {
+    override init(profile: Profile) {
+        super.init(profile: profile)
+        self.activityStream = MockActivityStreamDataObserver(profile: profile)
+    }
+}
 
-    func localName() -> String {
+open class MockActivityStreamDataObserver: DataObserver {
+    public var profile: Profile
+    public weak var delegate: DataObserverDelegate?
+
+    init(profile: Profile) {
+        self.profile = profile
+    }
+
+    public func refreshIfNeeded(forceHighlights highlights: Bool, forceTopSites topsites: Bool) {
+
+    }
+}
+
+open class MockProfile: Profile {
+    // Read/Writeable properties for mocking
+    public var recommendations: HistoryRecommendations
+    public var places: BrowserHistory & Favicons & SyncableHistory & ResettableSyncStorage & HistoryRecommendations
+    public var files: FileAccessor
+    public var history: BrowserHistory & SyncableHistory & ResettableSyncStorage
+    public var logins: BrowserLogins & SyncableLogins & ResettableSyncStorage
+    public var syncManager: SyncManager!
+
+    public lazy var panelDataObservers: PanelDataObservers = {
+        return MockPanelDataObservers(profile: self)
+    }()
+
+    var db: BrowserDB
+
+    fileprivate let name: String = "mockaccount"
+
+    init() {
+        files = MockFiles()
+        syncManager = MockSyncManager()
+        logins = MockLogins(files: files)
+        db = BrowserDB(filename: "mock.db", schema: BrowserSchema(), files: files)
+        places = SQLiteHistory(db: self.db, prefs: MockProfilePrefs())
+        recommendations = places
+        history = places
+    }
+
+    public func localName() -> String {
         return name
     }
 
-    func reopen() {
+    public func reopen() {
     }
 
-    func shutdown() {
+    public func shutdown() {
     }
 
-    var isShutdown: Bool = false
+    public var isShutdown: Bool = false
 
-    private var dbCreated = false
-    lazy var db: BrowserDB = {
-        self.dbCreated = true
-        return BrowserDB(filename: "mock.db", files: self.files)
-    }()
-
-    /**
-     * Favicons, history, and bookmarks are all stored in one intermeshed
-     * collection of tables.
-     */
-    private lazy var places: protocol<BrowserHistory, Favicons, SyncableHistory, ResettableSyncStorage, HistoryRecommendations> = {
-        return SQLiteHistory(db: self.db, prefs: MockProfilePrefs())
-    }()
-
-    var favicons: Favicons {
+    public var favicons: Favicons {
         return self.places
     }
 
-    lazy var queue: TabQueue = {
+    lazy public var queue: TabQueue = {
         return MockTabQueue()
     }()
 
-    var history: protocol<BrowserHistory, SyncableHistory, ResettableSyncStorage> {
-        return self.places
-    }
-
-    var recommendations: HistoryRecommendations {
-        return self.places
-    }
-
-    lazy var metadata: Metadata = {
+    lazy public var metadata: Metadata = {
         return SQLiteMetadata(db: self.db)
     }()
 
-    lazy var isChinaEdition: Bool = {
-        return NSLocale.currentLocale().localeIdentifier == "zh_CN"
+    lazy public var isChinaEdition: Bool = {
+        return Locale.current.identifier == "zh_CN"
     }()
 
-    lazy var syncManager: SyncManager = {
-        return MockSyncManager()
-    }()
-
-    lazy var certStore: CertStore = {
+    lazy public var certStore: CertStore = {
         return CertStore()
     }()
 
-    lazy var bookmarks: protocol<BookmarksModelFactorySource, SyncableBookmarks, LocalItemSource, MirrorItemSource, ShareToDestination> = {
+    lazy public var bookmarks: BookmarksModelFactorySource & KeywordSearchSource & SyncableBookmarks & LocalItemSource & MirrorItemSource & ShareToDestination = {
         // Make sure the rest of our tables are initialized before we try to read them!
         // This expression is for side-effects only.
         let p = self.places
@@ -136,23 +161,19 @@ public class MockProfile: Profile {
         return MergedSQLiteBookmarks(db: self.db)
     }()
 
-    lazy var searchEngines: SearchEngines = {
+    lazy public var searchEngines: SearchEngines = {
         return SearchEngines(prefs: self.prefs, files: self.files)
     }()
 
-    lazy var prefs: Prefs = {
+    lazy public var prefs: Prefs = {
         return MockProfilePrefs()
     }()
 
-    lazy var files: FileAccessor = {
-        return ProfileFileAccessor(profile: self)
-    }()
-
-    lazy var readingList: ReadingListService? = {
+    lazy public var readingList: ReadingListService? = {
         return ReadingListService(profileStoragePath: self.files.rootPath as String)
     }()
 
-    lazy var recentlyClosedTabs: ClosedTabsStore = {
+    lazy public var recentlyClosedTabs: ClosedTabsStore = {
         return ClosedTabsStore(prefs: self.prefs)
     }()
 
@@ -160,58 +181,55 @@ public class MockProfile: Profile {
         return SQLiteRemoteClientsAndTabs(db: self.db)
     }()
 
-    private lazy var syncCommands: SyncCommands = {
+    fileprivate lazy var syncCommands: SyncCommands = {
         return SQLiteRemoteClientsAndTabs(db: self.db)
     }()
 
-    lazy var logins: protocol<BrowserLogins, SyncableLogins, ResettableSyncStorage> = {
-        return MockLogins(files: self.files)
-    }()
+    public let accountConfiguration: FirefoxAccountConfiguration = ProductionFirefoxAccountConfiguration()
+    var account: FirefoxAccount?
 
-    let accountConfiguration: FirefoxAccountConfiguration = ProductionFirefoxAccountConfiguration()
-    var account: FirefoxAccount? = nil
-
-    func hasAccount() -> Bool {
+    public func hasAccount() -> Bool {
         return account != nil
     }
 
-    func hasSyncableAccount() -> Bool {
-        return account?.actionNeeded == FxAActionNeeded.None
+    public func hasSyncableAccount() -> Bool {
+        return account?.actionNeeded == FxAActionNeeded.none
     }
 
-    func getAccount() -> FirefoxAccount? {
+    public func getAccount() -> FirefoxAccount? {
         return account
     }
 
-    func setAccount(account: FirefoxAccount) {
+    public func setAccount(_ account: FirefoxAccount) {
         self.account = account
         self.syncManager.onAddedAccount()
     }
 
-    func flushAccount() {}
+    public func flushAccount() {}
 
-    func removeAccount() {
+    public func removeAccount() {
         let old = self.account
         self.account = nil
         self.syncManager.onRemovedAccount(old)
     }
 
-    func getClients() -> Deferred<Maybe<[RemoteClient]>> {
+    public func getClients() -> Deferred<Maybe<[RemoteClient]>> {
         return deferMaybe([])
     }
 
-    func getClientsAndTabs() -> Deferred<Maybe<[ClientAndTabs]>> {
+    public func getClientsAndTabs() -> Deferred<Maybe<[ClientAndTabs]>> {
         return deferMaybe([])
     }
 
-    func getCachedClientsAndTabs() -> Deferred<Maybe<[ClientAndTabs]>> {
+    public func getCachedClientsAndTabs() -> Deferred<Maybe<[ClientAndTabs]>> {
         return deferMaybe([])
     }
 
-    func storeTabs(tabs: [RemoteTab]) -> Deferred<Maybe<Int>> {
+    public func storeTabs(_ tabs: [RemoteTab]) -> Deferred<Maybe<Int>> {
         return deferMaybe(0)
     }
 
-    func sendItems(items: [ShareItem], toClients clients: [RemoteClient]) {
+    public func sendItems(_ items: [ShareItem], toClients clients: [RemoteClient]) -> Deferred<Maybe<SyncStatus>> {
+        return deferMaybe(SyncStatus.notStarted(.offline))
     }
 }

@@ -7,156 +7,162 @@ import Shared
 import WebKit
 
 struct TopTabsUX {
-    static let TopTabsViewHeight: CGFloat = 40
-    static let TopTabsBackgroundNormalColor = UIColor(red: 235/255, green: 235/255, blue: 235/255, alpha: 1)
-    static let TopTabsBackgroundPrivateColor = UIColor(red: 90/255, green: 90/255, blue: 90/255, alpha: 1)
-    static let TopTabsBackgroundNormalColorInactive = UIColor(red: 178/255, green: 178/255, blue: 178/255, alpha: 1)
-    static let TopTabsBackgroundPrivateColorInactive = UIColor(red: 53/255, green: 53/255, blue: 53/255, alpha: 1)
-    static let PrivateModeToolbarTintColor = UIColor(red: 124 / 255, green: 124 / 255, blue: 124 / 255, alpha: 1)
-    static let TopTabsBackgroundPadding: CGFloat = 35
-    static let TopTabsBackgroundShadowWidth: CGFloat = 35
-    static let TabWidth: CGFloat = 180
-    static let CollectionViewPadding: CGFloat = 15
-    static let FaderPading: CGFloat = 5
-    static let BackgroundSeparatorLinePadding: CGFloat = 5
-    static let TabTitleWidth: CGFloat = 110
+    static let TopTabsViewHeight: CGFloat = 44
+    static let TopTabsBackgroundShadowWidth: CGFloat = 12
+    static let TabWidth: CGFloat = 190
+    static let FaderPading: CGFloat = 8
+    static let SeparatorWidth: CGFloat = 1
+    static let HighlightLineWidth: CGFloat = 3
+    static let TabNudge: CGFloat = 1 // Nudge the favicon and close button by 1px
     static let TabTitlePadding: CGFloat = 10
+    static let AnimationSpeed: TimeInterval = 0.1
+    static let SeparatorYOffset: CGFloat = 7
+    static let SeparatorHeight: CGFloat = 32
 }
 
 protocol TopTabsDelegate: class {
     func topTabsDidPressTabs()
-    func topTabsDidPressNewTab()
-    func topTabsDidPressPrivateModeButton(cachedTab: Tab?)
+    func topTabsDidPressNewTab(_ isPrivate: Bool)
+
+    func topTabsDidTogglePrivateMode()
     func topTabsDidChangeTab()
 }
 
 protocol TopTabCellDelegate: class {
-    func tabCellDidClose(cell: TopTabCell)
+    func tabCellDidClose(_ cell: TopTabCell)
 }
 
 class TopTabsViewController: UIViewController {
     let tabManager: TabManager
     weak var delegate: TopTabsDelegate?
-    var isPrivate = false
+    fileprivate var isPrivate = false
+    let faviconNotification = NSNotification.Name(rawValue: FaviconManager.FaviconDidLoad)
+
     lazy var collectionView: UICollectionView = {
-        let collectionView = UICollectionView(frame: CGRectZero, collectionViewLayout: TopTabsViewLayout())
-        collectionView.registerClass(TopTabCell.self, forCellWithReuseIdentifier: TopTabCell.Identifier)
+        let collectionView = UICollectionView(frame: CGRect.zero, collectionViewLayout: TopTabsViewLayout())
+        collectionView.register(TopTabCell.self, forCellWithReuseIdentifier: TopTabCell.Identifier)
         collectionView.showsVerticalScrollIndicator = false
         collectionView.showsHorizontalScrollIndicator = false
         collectionView.bounces = false
         collectionView.clipsToBounds = false
         collectionView.accessibilityIdentifier = "Top Tabs View"
-        
         return collectionView
     }()
     
-    private lazy var tabsButton: TabsButton = {
+    fileprivate lazy var tabsButton: TabsButton = {
         let tabsButton = TabsButton.tabTrayButton()
-        tabsButton.addTarget(self, action: #selector(TopTabsViewController.tabsTrayTapped), forControlEvents: UIControlEvents.TouchUpInside)
+        tabsButton.addTarget(self, action: #selector(TopTabsViewController.tabsTrayTapped), for: UIControlEvents.touchUpInside)
         tabsButton.accessibilityIdentifier = "TopTabsViewController.tabsButton"
         return tabsButton
     }()
     
-    private lazy var newTab: UIButton = {
+    fileprivate lazy var newTab: UIButton = {
         let newTab = UIButton.newTabButton()
-        newTab.addTarget(self, action: #selector(TopTabsViewController.newTabTapped), forControlEvents: UIControlEvents.TouchUpInside)
+        newTab.addTarget(self, action: #selector(TopTabsViewController.newTabTapped), for: UIControlEvents.touchUpInside)
         return newTab
     }()
     
     lazy var privateModeButton: PrivateModeButton = {
         let privateModeButton = PrivateModeButton()
         privateModeButton.light = true
-        privateModeButton.addTarget(self, action: #selector(TopTabsViewController.togglePrivateModeTapped), forControlEvents: UIControlEvents.TouchUpInside)
+        privateModeButton.addTarget(self, action: #selector(TopTabsViewController.togglePrivateModeTapped), for: UIControlEvents.touchUpInside)
         return privateModeButton
     }()
     
-    private lazy var tabLayoutDelegate: TopTabsLayoutDelegate = {
+    fileprivate lazy var tabLayoutDelegate: TopTabsLayoutDelegate = {
         let delegate = TopTabsLayoutDelegate()
         delegate.tabSelectionDelegate = self
         return delegate
     }()
-    
-    private weak var lastNormalTab: Tab?
-    private weak var lastPrivateTab: Tab?
-    
-    private var tabsToDisplay: [Tab] {
+
+    fileprivate var tabsToDisplay: [Tab] {
         return self.isPrivate ? tabManager.privateTabs : tabManager.normalTabs
     }
-    
+
+    // Handle animations.
+    fileprivate var tabStore: [Tab] = [] //the actual datastore
+    fileprivate var pendingUpdatesToTabs: [Tab] = [] //the datastore we are transitioning to
+    fileprivate var needReloads: [Tab?] = [] // Tabs that need to be reloaded
+    fileprivate var isUpdating = false
+    fileprivate var pendingReloadData = false
+    fileprivate var oldTabs: [Tab]? // The last state of the tabs before an animation
+    fileprivate weak var oldSelectedTab: Tab? // Used to select the right tab when transitioning between private/normal tabs
+
     init(tabManager: TabManager) {
         self.tabManager = tabManager
         super.init(nibName: nil, bundle: nil)
-        NSNotificationCenter.defaultCenter().addObserver(self, selector: #selector(TopTabsViewController.reloadFavicons), name: FaviconManager.FaviconDidLoad, object: nil)
+        collectionView.dataSource = self
+        collectionView.delegate = tabLayoutDelegate
+        [UICollectionElementKindSectionHeader, UICollectionElementKindSectionFooter].forEach {
+            collectionView.register(TopTabsHeaderFooter.self, forSupplementaryViewOfKind: $0, withReuseIdentifier: "HeaderFooter")
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(TopTabsViewController.reloadFavicons(_:)), name: faviconNotification, object: nil)
     }
     
     deinit {
-        NSNotificationCenter.defaultCenter().removeObserver(self, name: FaviconManager.FaviconDidLoad, object: nil)
         self.tabManager.removeDelegate(self)
     }
     
     required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-    
-    override func viewWillAppear(animated: Bool) {
-        super.viewWillAppear(animated)
-        collectionView.dataSource = self
-        collectionView.delegate = tabLayoutDelegate
-        collectionView.reloadData()
-        dispatch_async(dispatch_get_main_queue()) { 
-             self.scrollToCurrentTab(false, centerCell: true)
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if self.tabsToDisplay != self.tabStore {
+            self.reloadData()
         }
     }
-    
+
     override func viewDidLoad() {
         super.viewDidLoad()
+
         tabManager.addDelegate(self)
-        
+        self.tabStore = self.tabsToDisplay
+
         let topTabFader = TopTabFader()
-        
+
+        view.addSubview(topTabFader)
+        topTabFader.addSubview(collectionView)
         view.addSubview(tabsButton)
         view.addSubview(newTab)
         view.addSubview(privateModeButton)
-        view.addSubview(topTabFader)
-        topTabFader.addSubview(collectionView)
         
-        newTab.snp_makeConstraints { make in
+        newTab.snp.makeConstraints { make in
             make.centerY.equalTo(view)
-            make.trailing.equalTo(view)
-            make.size.equalTo(UIConstants.ToolbarHeight)
+            make.trailing.equalTo(tabsButton.snp.leading).offset(-10)
+            make.size.equalTo(view.snp.height)
         }
-        tabsButton.snp_makeConstraints { make in
+        tabsButton.snp.makeConstraints { make in
             make.centerY.equalTo(view)
-            make.trailing.equalTo(newTab.snp_leading)
-            make.size.equalTo(UIConstants.ToolbarHeight)
+            make.trailing.equalTo(view).offset(-10)
+            make.size.equalTo(view.snp.height)
         }
-        privateModeButton.snp_makeConstraints { make in
+        privateModeButton.snp.makeConstraints { make in
             make.centerY.equalTo(view)
-            make.leading.equalTo(view)
-            make.size.equalTo(UIConstants.ToolbarHeight)
+            make.leading.equalTo(view).offset(10)
+            make.size.equalTo(view.snp.height)
         }
-        topTabFader.snp_makeConstraints { make in
+        topTabFader.snp.makeConstraints { make in
             make.top.bottom.equalTo(view)
-            make.leading.equalTo(privateModeButton.snp_trailing).offset(-TopTabsUX.FaderPading)
-            make.trailing.equalTo(tabsButton.snp_leading).offset(TopTabsUX.FaderPading)
+            make.leading.equalTo(privateModeButton.snp.trailing)
+            make.trailing.equalTo(newTab.snp.leading)
         }
-        collectionView.snp_makeConstraints { make in
-            make.top.bottom.equalTo(view)
-            make.leading.equalTo(privateModeButton.snp_trailing).offset(-TopTabsUX.CollectionViewPadding)
-            make.trailing.equalTo(tabsButton.snp_leading).offset(TopTabsUX.CollectionViewPadding)
+        collectionView.snp.makeConstraints { make in
+            make.edges.equalTo(topTabFader)
         }
-        
-        view.backgroundColor = UIColor.blackColor()
-        tabsButton.applyTheme(Theme.NormalMode)
+
+        view.backgroundColor = UIColor.Defaults.Grey80
+        tabsButton.applyTheme(.Normal)
         if let currentTab = tabManager.selectedTab {
-            applyTheme(currentTab.isPrivate ? Theme.PrivateMode : Theme.NormalMode)
+            applyTheme(currentTab.isPrivate ? .Private : .Normal)
         }
-        updateTabCount(tabsToDisplay.count)
+        updateTabCount(tabStore.count, animated: false)
     }
     
     func switchForegroundStatus(isInForeground reveal: Bool) {
         // Called when the app leaves the foreground to make sure no information is inadvertently revealed
-        if let cells = self.collectionView.visibleCells() as? [TopTabCell] {
+        if let cells = self.collectionView.visibleCells as? [TopTabCell] {
             let alpha: CGFloat = reveal ? 1 : 0
             for cell in cells {
                 cell.titleText.alpha = alpha
@@ -165,7 +171,7 @@ class TopTabsViewController: UIViewController {
         }
     }
     
-    func updateTabCount(count: Int, animated: Bool = true) {
+    func updateTabCount(_ count: Int, animated: Bool = true) {
         self.tabsButton.updateTabCount(count, animated: animated)
     }
     
@@ -174,126 +180,118 @@ class TopTabsViewController: UIViewController {
     }
     
     func newTabTapped() {
-        if let currentTab = tabManager.selectedTab, let index = tabsToDisplay.indexOf(currentTab),
-            let cell  = collectionView.cellForItemAtIndexPath(NSIndexPath(forItem: index, inSection: 0)) as? TopTabCell {
-            cell.selectedTab = false
-            if index > 0 {
-                cell.seperatorLine = true
-            }
-        }
-        delegate?.topTabsDidPressNewTab()
-        self.privateModeButton.enabled = false
-        collectionView.performBatchUpdates({ _ in
-            let count = self.collectionView.numberOfItemsInSection(0)
-            self.collectionView.insertItemsAtIndexPaths([NSIndexPath(forItem: count, inSection: 0)])
-            }, completion: { finished in
-                if finished {
-                    self.privateModeButton.enabled = true
-                    self.scrollToCurrentTab()
-                }
-        })
-    }
-    
-    func togglePrivateModeTapped() {
-        delegate?.topTabsDidPressPrivateModeButton(isPrivate ? lastNormalTab : lastPrivateTab)
-        self.privateModeButton.setSelected(isPrivate, animated: true)
-        self.collectionView.reloadData()
-        self.scrollToCurrentTab(false, centerCell: true)
-    }
-    
-    func closeTab() {
-        delegate?.topTabsDidPressTabs()
-    }
-    
-    func reloadFavicons() {
-        self.collectionView.reloadData()
-    }
-    
-    func scrollToCurrentTab(animated: Bool = true, centerCell: Bool = false) {
-        guard let currentTab = tabManager.selectedTab, let index = tabsToDisplay.indexOf(currentTab) where !collectionView.frame.isEmpty else {
+        if pendingReloadData {
             return
         }
-        if let frame = collectionView.layoutAttributesForItemAtIndexPath(NSIndexPath(forRow: index, inSection: 0))?.frame {
+        self.delegate?.topTabsDidPressNewTab(self.isPrivate)
+        LeanPlumClient.shared.track(event: .openedNewTab, withParameters: ["Source": "Add tab button in the URL Bar on iPad" as AnyObject])
+    }
+
+    func togglePrivateModeTapped() {
+        if isUpdating || pendingReloadData {
+            return
+        }
+        let isPrivate = self.isPrivate
+        delegate?.topTabsDidTogglePrivateMode()
+        self.pendingReloadData = true // Stops animations from happening
+        let oldSelectedTab = self.oldSelectedTab
+        self.oldSelectedTab = tabManager.selectedTab
+        self.privateModeButton.setSelected(!isPrivate, animated: true)
+
+        //if private tabs is empty and we are transitioning to it add a tab
+        if tabManager.privateTabs.isEmpty  && !isPrivate {
+            tabManager.addTab(isPrivate: true)
+        }
+
+        //get the tabs from which we will select which one to nominate for tribute (selection)
+        //the isPrivate boolean still hasnt been flipped. (It'll be flipped in the BVC didSelectedTabChange method)
+        let tabs = !isPrivate ? tabManager.privateTabs : tabManager.normalTabs
+        if let tab = oldSelectedTab, tabs.index(of: tab) != nil {
+            tabManager.selectTab(tab)
+        } else {
+            tabManager.selectTab(tabs.last)
+        }
+    }
+
+    func reloadFavicons(_ notification: Notification) {
+        // Notifications might be called from a different thread. Make sure animations only happen on the main thread.
+        DispatchQueue.main.async {
+            if let tab = notification.object as? Tab, self.tabStore.index(of: tab) != nil {
+                self.needReloads.append(tab)
+                self.performTabUpdates()
+            }
+        }
+    }
+    
+    func scrollToCurrentTab(_ animated: Bool = true, centerCell: Bool = false) {
+        assertIsMainThread("Only animate on the main thread")
+
+        guard let currentTab = tabManager.selectedTab, let index = tabStore.index(of: currentTab), !collectionView.frame.isEmpty else {
+            return
+        }
+        if let frame = collectionView.layoutAttributesForItem(at: IndexPath(row: index, section: 0))?.frame {
             if centerCell {
-                collectionView.scrollToItemAtIndexPath(NSIndexPath(forItem: index, inSection: 0), atScrollPosition: .CenteredHorizontally, animated: false)
+                collectionView.scrollToItem(at: IndexPath(item: index, section: 0), at: .centeredHorizontally, animated: false)
             } else {
                 // Padding is added to ensure the tab is completely visible (none of the tab is under the fader)
                 let padFrame = frame.insetBy(dx: -(TopTabsUX.TopTabsBackgroundShadowWidth+TopTabsUX.FaderPading), dy: 0)
-                collectionView.scrollRectToVisible(padFrame, animated: animated)
+                if animated {
+                    UIView.animate(withDuration: TopTabsUX.AnimationSpeed, animations: { 
+                        self.collectionView.scrollRectToVisible(padFrame, animated: true)
+                    })
+                } else {
+                    collectionView.scrollRectToVisible(padFrame, animated: false)
+                }
             }
         }
     }
 }
 
 extension TopTabsViewController: Themeable {
-    func applyTheme(themeName: String) {
-        tabsButton.applyTheme(themeName)
-        isPrivate = (themeName == Theme.PrivateMode)
-        privateModeButton.styleForMode(privateMode: isPrivate)
-        newTab.tintColor = isPrivate ? UIConstants.PrivateModePurple : UIColor.whiteColor()
-        if let layout = collectionView.collectionViewLayout as? TopTabsViewLayout {
-            if isPrivate {
-                layout.themeColor = TopTabsUX.TopTabsBackgroundPrivateColorInactive
-            } else {
-                layout.themeColor = TopTabsUX.TopTabsBackgroundNormalColorInactive
-            }
-        }
+    func applyTheme(_ theme: Theme) {
+        tabsButton.applyTheme(theme)
+        tabsButton.titleBackgroundColor = view.backgroundColor ?? UIColor.Defaults.Grey80
+        tabsButton.textColor = UIColor.Defaults.Grey40
+
+        isPrivate = (theme == Theme.Private)
+        privateModeButton.applyTheme(theme)
+        privateModeButton.tintColor = UIColor.TopTabs.PrivateModeTint.colorFor(theme)
+        privateModeButton.imageView?.tintColor = privateModeButton.tintColor
+        newTab.tintColor = UIColor.Defaults.Grey40
+        collectionView.backgroundColor = view.backgroundColor
     }
 }
 
 extension TopTabsViewController: TopTabCellDelegate {
-    func tabCellDidClose(cell: TopTabCell) {
-        guard let indexPath = collectionView.indexPathForCell(cell) else {
+    func tabCellDidClose(_ cell: TopTabCell) {
+        // Trying to remove tabs while animating can lead to crashes as indexes change. If updates are happening don't allow tabs to be removed.
+        guard let index = collectionView.indexPath(for: cell)?.item else {
             return
         }
-        let tab = tabsToDisplay[indexPath.item]
-        var selectedTab = false
-        if tab == tabManager.selectedTab {
-            selectedTab = true
-            delegate?.topTabsDidChangeTab()
-        }
-        if tabsToDisplay.count == 1 {
+        let tab = tabStore[index]
+        if tabsToDisplay.index(of: tab) != nil {
             tabManager.removeTab(tab)
-            tabManager.selectTab(tabsToDisplay.first)
-            collectionView.reloadData()
-        } else {
-            var nextTab: Tab
-            let currentIndex = indexPath.item
-            if tabsToDisplay.count-1 > currentIndex {
-                nextTab = tabsToDisplay[currentIndex+1]
-            } else {
-                nextTab = tabsToDisplay[currentIndex-1]
-            }
-            tabManager.removeTab(tab)
-            if selectedTab {
-                tabManager.selectTab(nextTab)
-            }
-            self.collectionView.performBatchUpdates({
-                self.collectionView.deleteItemsAtIndexPaths([indexPath])
-                }, completion: { finished in
-                    self.collectionView.reloadData()
-            })
         }
     }
 }
 
 extension TopTabsViewController: UICollectionViewDataSource {
-    @objc func collectionView(collectionView: UICollectionView, cellForItemAtIndexPath indexPath: NSIndexPath) -> UICollectionViewCell {
+    @objc func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let index = indexPath.item
-        let tabCell = collectionView.dequeueReusableCellWithReuseIdentifier(TopTabCell.Identifier, forIndexPath: indexPath) as! TopTabCell
+        let tabCell = collectionView.dequeueReusableCell(withReuseIdentifier: TopTabCell.Identifier, for: indexPath) as! TopTabCell
         tabCell.delegate = self
         
-        let tab = tabsToDisplay[index]
-        tabCell.style = tab.isPrivate ? .Dark : .Light
+        let tab = tabStore[index]
+        tabCell.style = tab.isPrivate ? .dark : .light
         tabCell.titleText.text = tab.displayTitle
         
         if tab.displayTitle.isEmpty {
-            if (tab.webView?.URL?.baseDomain()?.contains("localhost") ?? true) {
-                tabCell.titleText.text = AppMenuConfiguration.NewTabTitleString
+            if tab.webView?.url?.baseDomain?.contains("localhost") ?? true {
+                tabCell.titleText.text = Strings.AppMenuNewTabTitleString
             } else {
-                tabCell.titleText.text = tab.webView?.URL?.absoluteDisplayString()
+                tabCell.titleText.text = tab.webView?.url?.absoluteDisplayString
             }
-            tabCell.accessibilityLabel = AboutUtils.getAboutComponent(tab.url)
+            tabCell.accessibilityLabel = tab.url?.aboutComponent ?? ""
             tabCell.closeButton.accessibilityLabel = String(format: Strings.TopSitesRemoveButtonAccessibilityLabel, tabCell.titleText.text ?? "")
         } else {
             tabCell.accessibilityLabel = tab.displayTitle
@@ -301,77 +299,259 @@ extension TopTabsViewController: UICollectionViewDataSource {
         }
 
         tabCell.selectedTab = (tab == tabManager.selectedTab)
-        
-        if index > 0 && index < tabsToDisplay.count && tabsToDisplay[index] != tabManager.selectedTab && tabsToDisplay[index-1] != tabManager.selectedTab {
-            tabCell.seperatorLine = true
+        if let siteURL = tab.url?.displayURL {
+            tabCell.favicon.setIcon(tab.displayFavicon, forURL: siteURL, completed: { (color, url) in
+                if siteURL == url {
+                    tabCell.favicon.image = tabCell.favicon.image?.createScaled(CGSize(width: 15, height: 15))
+                    tabCell.favicon.backgroundColor = color == .clear ? .white : color
+                    tabCell.favicon.contentMode = .center
+                }
+            })
         } else {
-            tabCell.seperatorLine = false
-        }
-        
-        if let favIcon = tab.displayFavicon,
-           let url = NSURL(string: favIcon.url) {
-            tabCell.favicon.sd_setImageWithURL(url)
-        } else {
-            var defaultFavicon = UIImage(named: "defaultFavicon")
-            if tab.isPrivate {
-                defaultFavicon = defaultFavicon?.imageWithRenderingMode(.AlwaysTemplate)
-                tabCell.favicon.image = defaultFavicon
-                tabCell.favicon.tintColor = UIColor.whiteColor()
-            } else {
-                tabCell.favicon.image = defaultFavicon
-            }
+            tabCell.favicon.image = UIImage(named: "defaultFavicon")
+            tabCell.favicon.contentMode = .scaleAspectFit
+            tabCell.favicon.backgroundColor = .clear
         }
         
         return tabCell
     }
     
-    @objc func collectionView(collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return tabsToDisplay.count
+    @objc func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return tabStore.count
     }
+
+    @objc func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
+        let view = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "HeaderFooter", for: indexPath) as! TopTabsHeaderFooter
+        view.arrangeLine(kind)
+        return view
+    }
+
 }
 
 extension TopTabsViewController: TabSelectionDelegate {
-    func didSelectTabAtIndex(index: Int) {
-        let tab = tabsToDisplay[index]
-        tabManager.selectTab(tab)
-        collectionView.reloadData()
-        collectionView.setNeedsDisplay()
-        delegate?.topTabsDidChangeTab()
-        scrollToCurrentTab()
+    func didSelectTabAtIndex(_ index: Int) {
+        let tab = tabStore[index]
+        if tabsToDisplay.index(of: tab) != nil {
+            tabManager.selectTab(tab)
+        }
     }
 }
 
-extension TopTabsViewController : WKNavigationDelegate {
-    func webView(webView: WKWebView, didFinishNavigation navigation: WKNavigation!) {
-        collectionView.reloadData()
+// Collection Diff (animations)
+extension TopTabsViewController {
+
+    struct TopTabChangeSet {
+        let reloads: Set<IndexPath>
+        let inserts: Set<IndexPath>
+        let deletes: Set<IndexPath>
+
+        init(reloadArr: [IndexPath], insertArr: [IndexPath], deleteArr: [IndexPath]) {
+            reloads = Set(reloadArr)
+            inserts = Set(insertArr)
+            deletes = Set(deleteArr)
+        }
+
+        var all: [Set<IndexPath>] {
+            return [inserts, reloads, deletes]
+        }
+
     }
-    
-    func webView(webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        collectionView.reloadData()
+
+    // create a TopTabChangeSet which is a snapshot of updates to perfrom on a collectionView
+    func calculateDiffWith(_ oldTabs: [Tab], to newTabs: [Tab], and reloadTabs: [Tab?]) -> TopTabChangeSet {
+        let inserts: [IndexPath] = newTabs.enumerated().flatMap { index, tab in
+            if oldTabs.index(of: tab) == nil {
+                return IndexPath(row: index, section: 0)
+            }
+            return nil
+        }
+
+        let deletes: [IndexPath] = oldTabs.enumerated().flatMap { index, tab in
+            if newTabs.index(of: tab) == nil {
+                return IndexPath(row: index, section: 0)
+            }
+            return nil
+        }
+
+        // Create based on what is visibile but filter out tabs we are about to insert/delete.
+        let reloads: [IndexPath] = reloadTabs.flatMap { tab in
+            guard let tab = tab, newTabs.index(of: tab) != nil else {
+                return nil
+            }
+            return IndexPath(row: newTabs.index(of: tab)!, section: 0)
+            }.filter { return inserts.index(of: $0) == nil && deletes.index(of: $0) == nil }
+
+        return TopTabChangeSet(reloadArr: reloads, insertArr: inserts, deleteArr: deletes)
+    }
+
+    func updateTabsFrom(_ oldTabs: [Tab]?, to newTabs: [Tab], on completion: (() -> Void)? = nil) {
+        assertIsMainThread("Updates can only be performed from the main thread")
+        guard let oldTabs = oldTabs, !self.isUpdating, !self.pendingReloadData else {
+            return
+        }
+
+        // Lets create our change set
+        let update = self.calculateDiffWith(oldTabs, to: newTabs, and: needReloads)
+        flushPendingChanges()
+
+        // If there are no changes. We have nothing to do
+        if update.all.every({ $0.isEmpty }) {
+            completion?()
+            return
+        }
+
+        // The actual update block. We update the dataStore right before we do the UI updates.
+        let updateBlock = {
+            self.tabStore = newTabs
+            self.collectionView.deleteItems(at: Array(update.deletes))
+            self.collectionView.insertItems(at: Array(update.inserts))
+            self.collectionView.reloadItems(at: Array(update.reloads))
+        }
+
+        //Lets lock any other updates from happening.
+        self.isUpdating = true
+        self.pendingUpdatesToTabs = newTabs // This var helps other mutations that might happen while updating.
+
+        // The actual update
+        UIView.animate(withDuration: TopTabsUX.AnimationSpeed, animations: {
+            self.collectionView.performBatchUpdates(updateBlock)
+        }) { (_) in
+            self.isUpdating = false
+            self.pendingUpdatesToTabs = []
+            // Sometimes there might be a pending reload. Lets do that.
+            if self.pendingReloadData {
+                return self.reloadData()
+            }
+
+            // There can be pending animations. Run update again to clear them.
+            let tabs = self.oldTabs ?? self.tabStore
+            self.updateTabsFrom(tabs, to: self.tabsToDisplay, on: {
+                if !update.inserts.isEmpty || !update.reloads.isEmpty {
+                    self.scrollToCurrentTab()
+                }
+            })
+        }
+    }
+
+    fileprivate func flushPendingChanges() {
+        oldTabs = nil
+        needReloads.removeAll()
+    }
+
+    fileprivate func reloadData() {
+        assertIsMainThread("reloadData must only be called from main thread")
+
+        if self.isUpdating || self.collectionView.frame == CGRect.zero {
+            self.pendingReloadData = true
+            return
+        }
+
+        isUpdating = true
+        self.tabStore = self.tabsToDisplay
+        self.newTab.isUserInteractionEnabled = false
+        self.flushPendingChanges()
+        UIView.animate(withDuration: TopTabsUX.AnimationSpeed, animations: {
+            self.collectionView.reloadData()
+            self.collectionView.collectionViewLayout.invalidateLayout()
+            self.collectionView.layoutIfNeeded()
+            self.scrollToCurrentTab(true, centerCell: true)
+        }, completion: { (_) in
+            self.isUpdating = false
+            self.pendingReloadData = false
+            self.performTabUpdates()
+            self.newTab.isUserInteractionEnabled = true
+        }) 
     }
 }
 
 extension TopTabsViewController: TabManagerDelegate {
-    func tabManager(tabManager: TabManager, didSelectedTabChange selected: Tab?, previous: Tab?) {
-        if selected?.isPrivate ?? false {
-            lastPrivateTab = selected
+
+    // Because we don't know when we are about to transition to private mode
+    // check to make sure that the tab we are trying to add is being added to the right tab group
+    fileprivate func tabsMatchDisplayGroup(_ a: Tab?, b: Tab?) -> Bool {
+        if let a = a, let b = b, a.isPrivate == b.isPrivate {
+            return true
+        }
+        return false
+    }
+
+    func performTabUpdates() {
+        guard !isUpdating else {
+            return
+        }
+
+        let fromTabs = !self.pendingUpdatesToTabs.isEmpty ? self.pendingUpdatesToTabs : self.oldTabs
+        self.oldTabs = fromTabs ?? self.tabStore
+        if self.pendingReloadData && !isUpdating {
+            self.reloadData()
         } else {
-            lastNormalTab = selected
+            self.updateTabsFrom(self.oldTabs, to: self.tabsToDisplay)
         }
     }
-    func tabManager(tabManager: TabManager, didCreateTab tab: Tab) {}
-    func tabManager(tabManager: TabManager, didAddTab tab: Tab) {}
-    func tabManager(tabManager: TabManager, didRemoveTab tab: Tab) {}
-    func tabManagerDidRestoreTabs(tabManager: TabManager) {}
-    func tabManagerDidAddTabs(tabManager: TabManager) {
-        collectionView.reloadData()
+
+    // This helps make sure animations don't happen before the view is loaded.
+    fileprivate var isRestoring: Bool {
+        return self.tabManager.isRestoring || self.collectionView.frame == CGRect.zero
     }
-    func tabManagerDidRemoveAllTabs(tabManager: TabManager, toast: ButtonToast?) {
-        if let privateTab = lastPrivateTab where !tabManager.tabs.contains(privateTab) {
-            lastPrivateTab = nil
+
+    func tabManager(_ tabManager: TabManager, didSelectedTabChange selected: Tab?, previous: Tab?) {
+        if isRestoring {
+            return
         }
-        if let normalTab = lastNormalTab where !tabManager.tabs.contains(normalTab) {
-            lastNormalTab = nil
+        if !tabsMatchDisplayGroup(selected, b: previous) {
+            self.reloadData()
+        } else {
+            self.needReloads.append(selected)
+            self.needReloads.append(previous)
+            performTabUpdates()
+            delegate?.topTabsDidChangeTab()
         }
+    }
+
+    func tabManager(_ tabManager: TabManager, willAddTab tab: Tab) {
+        // We need to store the earliest oldTabs. So if one already exists use that.
+        self.oldTabs = self.oldTabs ?? tabStore
+    }
+
+    func tabManager(_ tabManager: TabManager, didAddTab tab: Tab) {
+        if isRestoring || (tabManager.selectedTab != nil && !tabsMatchDisplayGroup(tab, b: tabManager.selectedTab)) {
+            return
+        }
+        performTabUpdates()
+    }
+
+    func tabManager(_ tabManager: TabManager, willRemoveTab tab: Tab) {
+        // We need to store the earliest oldTabs. So if one already exists use that.
+        self.oldTabs = self.oldTabs ?? tabStore
+    }
+
+    func tabManager(_ tabManager: TabManager, didRemoveTab tab: Tab) {
+        if isRestoring {
+            return
+        }
+        // If we deleted the last private tab. We'll be switching back to normal browsing. Pause updates till then
+        if self.tabsToDisplay.isEmpty {
+            self.pendingReloadData = true
+            return
+        }
+
+        // dont want to hold a ref to a deleted tab
+        if tab === oldSelectedTab {
+            oldSelectedTab = nil
+        }
+
+        performTabUpdates()
+    }
+
+    func tabManagerDidRestoreTabs(_ tabManager: TabManager) {
+        self.reloadData()
+    }
+
+    func tabManagerDidAddTabs(_ tabManager: TabManager) {
+        self.reloadData()
+    }
+
+    func tabManagerDidRemoveAllTabs(_ tabManager: TabManager, toast: ButtonToast?) {
+        self.reloadData()
     }
 }

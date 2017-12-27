@@ -8,10 +8,14 @@ import Shared
 import XCGLogger
 import Deferred
 
-public class SerializeRecordFailure<T: CleartextPayloadJSON>: MaybeErrorType {
-    public let record: Record<T>
+open class SerializeRecordFailure<T: CleartextPayloadJSON>: MaybeErrorType, SyncPingFailureFormattable {
+    open let record: Record<T>
 
-    public var description: String {
+    open var failureReasonName: SyncPingFailureReasonName {
+        return .otherError
+    }
+
+    open var description: String {
         return "Failed to serialize record: \(record)"
     }
 
@@ -23,53 +27,71 @@ public class SerializeRecordFailure<T: CleartextPayloadJSON>: MaybeErrorType {
 private let log = Logger.syncLogger
 
 private typealias UploadRecord = (guid: GUID, payload: String, sizeBytes: Int)
-private typealias DeferredResponse = Deferred<Maybe<StorageResponse<POSTResult>>>
+public typealias DeferredResponse = Deferred<Maybe<StorageResponse<POSTResult>>>
 
-typealias BatchUploadFunction = (lines: [String], ifUnmodifiedSince: Timestamp?, queryParams: [NSURLQueryItem]?) -> Deferred<Maybe<StorageResponse<POSTResult>>>
+typealias BatchUploadFunction = (_ lines: [String], _ ifUnmodifiedSince: Timestamp?, _ queryParams: [URLQueryItem]?) -> Deferred<Maybe<StorageResponse<POSTResult>>>
 
-private let commitParam = NSURLQueryItem(name: "commit", value: "true")
+private let commitParam = URLQueryItem(name: "commit", value: "true")
 
 private enum AccumulateRecordError: MaybeErrorType {
     var description: String {
         switch self {
-        case .Full:
+        case .full:
             return "Batch or payload is full."
-        case .Unknown:
+        case .unknown:
             return "Unknown errored while trying to accumulate records in batch"
         }
     }
 
-    case Full(uploadOp: DeferredResponse)
-    case Unknown
+    case full(uploadOp: DeferredResponse)
+    case unknown
 }
 
-public class Sync15BatchClient<T: CleartextPayloadJSON> {
-    private(set) var ifUnmodifiedSince: Timestamp?
+open class TooManyRecordsError: MaybeErrorType, SyncPingFailureFormattable {
+    open var description: String {
+        return "Trying to send too many records in a single batch."
+    }
+    open var failureReasonName: SyncPingFailureReasonName {
+        return .otherError
+    }
+}
 
-    private let config: InfoConfiguration
-    private let uploader: BatchUploadFunction
-    private let serializeRecord: (Record<T>) -> String?
+open class RecordsFailedToUpload: MaybeErrorType, SyncPingFailureFormattable {
+    open var description: String {
+        return "Some records failed to upload"
+    }
+    open var failureReasonName: SyncPingFailureReasonName {
+        return .otherError
+    }
+}
 
-    private var batchToken: BatchToken?
+open class Sync15BatchClient<T: CleartextPayloadJSON> {
+    fileprivate(set) var ifUnmodifiedSince: Timestamp?
+
+    fileprivate let config: InfoConfiguration
+    fileprivate let uploader: BatchUploadFunction
+    fileprivate let serializeRecord: (Record<T>) -> String?
+
+    fileprivate var batchToken: BatchToken?
 
     // Keep track of the limits of a single batch
-    private var totalBytes: ByteCount = 0
-    private var totalRecords: Int = 0
+    fileprivate var totalBytes: ByteCount = 0
+    fileprivate var totalRecords: Int = 0
 
     // Keep track of the limits of a single POST
-    private var postBytes: ByteCount = 0
-    private var postRecords: Int = 0
+    fileprivate var postBytes: ByteCount = 0
+    fileprivate var postRecords: Int = 0
 
-    private var records = [UploadRecord]()
+    fileprivate var records = [UploadRecord]()
 
-    private var onCollectionUploaded: (POSTResult, Timestamp?) -> DeferredTimestamp
+    fileprivate var onCollectionUploaded: (POSTResult, Timestamp?) -> DeferredTimestamp
 
-    private func batchQueryParamWithValue(value: String) -> NSURLQueryItem {
-        return NSURLQueryItem(name: "batch", value: value)
+    fileprivate func batchQueryParamWithValue(_ value: String) -> URLQueryItem {
+        return URLQueryItem(name: "batch", value: value)
     }
 
-    init(config: InfoConfiguration, ifUnmodifiedSince: Timestamp? = nil, serializeRecord: (Record<T>) -> String?,
-         uploader: BatchUploadFunction, onCollectionUploaded: (POSTResult, Timestamp?) -> DeferredTimestamp) {
+    init(config: InfoConfiguration, ifUnmodifiedSince: Timestamp? = nil, serializeRecord: @escaping (Record<T>) -> String?,
+         uploader: @escaping BatchUploadFunction, onCollectionUploaded: @escaping (POSTResult, Timestamp?) -> DeferredTimestamp) {
         self.config = config
         self.ifUnmodifiedSince = ifUnmodifiedSince
         self.uploader = uploader
@@ -78,7 +100,7 @@ public class Sync15BatchClient<T: CleartextPayloadJSON> {
         self.onCollectionUploaded = onCollectionUploaded
     }
 
-    public func endBatch() -> Success {
+    open func endBatch() -> Success {
         guard !records.isEmpty else {
             return succeed()
         }
@@ -88,27 +110,49 @@ public class Sync15BatchClient<T: CleartextPayloadJSON> {
         }
 
         let lines = self.freezePost()
-        return self.uploader(lines: lines, ifUnmodifiedSince: self.ifUnmodifiedSince, queryParams: nil)
+        return self.uploader(lines, self.ifUnmodifiedSince, nil)
             >>== effect(moveForward)
             >>> succeed
     }
 
-    public func addRecords(records: [Record<T>]) -> Success {
+    // If in batch mode, will discard the batch if any record fails
+    open func endSingleBatch() -> Deferred<Maybe<(succeeded: [GUID], lastModified: Timestamp?)>> {
+        return self.start() >>== { response in
+            let succeeded = response.value.success
+            guard let token = self.batchToken else {
+                return deferMaybe((succeeded: succeeded, lastModified: response.metadata.lastModifiedMilliseconds))
+            }
+            guard succeeded.count == self.totalRecords else {
+                return deferMaybe(RecordsFailedToUpload())
+            }
+            return self.commitBatch(token) >>== { commitResp in
+                return deferMaybe((succeeded: succeeded, lastModified: commitResp.metadata.lastModifiedMilliseconds))
+            }
+        }
+    }
+
+    open func addRecords(_ records: [Record<T>], singleBatch: Bool = false) -> Success {
         guard !records.isEmpty else {
             return succeed()
         }
 
-        do {
-            // Eagerly serializer the record prior to processing them so we can catch any issues
-            // with record sizes before we start uploading to the server.
-            let serialized = try records.map { try serialize($0) }
-            return addRecords(serialized.generate())
-        } catch let e {
-            return deferMaybe(e as! MaybeErrorType)
+        // Eagerly serializer the record prior to processing them so we can catch any issues
+        // with record sizes before we start uploading to the server.
+        let serializeThunks = records.map { record in
+            return { self.serialize(record) }
+        }
+
+        return accumulate(serializeThunks) >>== {
+            let iter = $0.makeIterator()
+            if singleBatch {
+                return self.addRecordsInSingleBatch(iter)
+            } else {
+                return self.addRecords(iter)
+            }
         }
     }
 
-    private func addRecords(generator: IndexingGenerator<[UploadRecord]>) -> Success {
+    fileprivate func addRecords(_ generator: IndexingIterator<[UploadRecord]>) -> Success {
         var mutGenerator = generator
         while let record = mutGenerator.next() {
             return accumulateOrUpload(record) >>> { self.addRecords(mutGenerator) }
@@ -116,54 +160,66 @@ public class Sync15BatchClient<T: CleartextPayloadJSON> {
         return succeed()
     }
 
-    private func accumulateOrUpload(record: UploadRecord) -> Success {
-        do {
-            // Try to add the record to our buffer
-            try accumulateRecord(record)
-        } catch AccumulateRecordError.Full(let uploadOp) {
-            // When we're full, run the upload and try to add the record
-            // after uploading since we've made room for it.
-            return uploadOp >>> { self.accumulateOrUpload(record) }
-        } catch let e {
-            // Should never happen.
-            return deferMaybe(e as! MaybeErrorType)
+    fileprivate func addRecordsInSingleBatch(_ generator: IndexingIterator<[UploadRecord]>) -> Success {
+        var mutGenerator = generator
+        while let record = mutGenerator.next() {
+            guard self.addToPost(record) else {
+                return deferMaybe(TooManyRecordsError())
+            }
         }
         return succeed()
     }
 
-    private func accumulateRecord(record: UploadRecord) throws {
+    fileprivate func accumulateOrUpload(_ record: UploadRecord) -> Success {
+        return accumulateRecord(record).bind { result in
+            // Try to add the record to our buffer
+            guard let e = result.failureValue as? AccumulateRecordError else {
+                return succeed()
+            }
+
+            switch e {
+            case .full(let uploadOp):
+                return uploadOp >>> { self.accumulateOrUpload(record) }
+            default:
+                return deferMaybe(e)
+            }
+        }
+    }
+
+    fileprivate func accumulateRecord(_ record: UploadRecord) -> Success {
         guard let token = self.batchToken else {
             guard addToPost(record) else {
-                throw AccumulateRecordError.Full(uploadOp: self.start())
+                return deferMaybe(AccumulateRecordError.full(uploadOp: self.start()))
             }
-            return
+            return succeed()
         }
 
         guard fitsInBatch(record) else {
-            throw AccumulateRecordError.Full(uploadOp: self.commitBatch(token))
+            return deferMaybe(AccumulateRecordError.full(uploadOp: self.commitBatch(token)))
         }
 
         guard addToPost(record) else {
-            throw AccumulateRecordError.Full(uploadOp: self.postInBatch(token))
+            return deferMaybe(AccumulateRecordError.full(uploadOp: self.postInBatch(token)))
         }
 
         addToBatch(record)
+        return succeed()
     }
 
-    private func serialize(record: Record<T>) throws -> UploadRecord {
+    fileprivate func serialize(_ record: Record<T>) -> Deferred<Maybe<UploadRecord>> {
         guard let line = self.serializeRecord(record) else {
-            throw SerializeRecordFailure(record: record)
+            return deferMaybe(SerializeRecordFailure(record: record))
         }
 
         let lineSize = line.utf8.count
         guard lineSize < Sync15StorageClient.maxRecordSizeBytes else {
-            throw RecordTooLargeError(size: lineSize, guid: record.id)
+            return deferMaybe(RecordTooLargeError(size: lineSize, guid: record.id))
         }
 
-        return (record.id, line, lineSize)
+        return deferMaybe((record.id, line, lineSize))
     }
 
-    private func addToPost(record: UploadRecord) -> Bool {
+    fileprivate func addToPost(_ record: UploadRecord) -> Bool {
         guard postRecords + 1 <= config.maxPostRecords && postBytes + record.sizeBytes <= config.maxPostBytes else {
             return false
         }
@@ -173,34 +229,34 @@ public class Sync15BatchClient<T: CleartextPayloadJSON> {
         return true
     }
 
-    private func fitsInBatch(record: UploadRecord) -> Bool {
+    fileprivate func fitsInBatch(_ record: UploadRecord) -> Bool {
         return totalRecords + 1 <= config.maxTotalRecords && totalBytes + record.sizeBytes <= config.maxTotalBytes
     }
 
-    private func addToBatch(record: UploadRecord) {
+    fileprivate func addToBatch(_ record: UploadRecord) {
         totalRecords += 1
         totalBytes += record.sizeBytes
     }
 
-    private func postInBatch(token: BatchToken) -> DeferredResponse {
+    fileprivate func postInBatch(_ token: BatchToken) -> DeferredResponse {
         // Push up the current payload to the server and reset
         let lines = self.freezePost()
-        return uploader(lines: lines, ifUnmodifiedSince: self.ifUnmodifiedSince, queryParams: [batchQueryParamWithValue(token)])
+        return uploader(lines, self.ifUnmodifiedSince, [batchQueryParamWithValue(token)])
     }
 
-    private func commitBatch(token: BatchToken) -> DeferredResponse {
+    fileprivate func commitBatch(_ token: BatchToken) -> DeferredResponse {
         resetBatch()
         let lines = self.freezePost()
         let queryParams = [batchQueryParamWithValue(token), commitParam]
-        return uploader(lines: lines, ifUnmodifiedSince: self.ifUnmodifiedSince, queryParams: queryParams)
+        return uploader(lines, self.ifUnmodifiedSince, queryParams)
             >>== effect(moveForward)
     }
 
-    private func start() -> DeferredResponse {
+    fileprivate func start() -> DeferredResponse {
         let postRecordCount = self.postRecords
         let postBytesCount = self.postBytes
         let lines = freezePost()
-        return self.uploader(lines: lines, ifUnmodifiedSince: self.ifUnmodifiedSince, queryParams: [batchQueryParamWithValue("true")])
+        return self.uploader(lines, self.ifUnmodifiedSince, [batchQueryParamWithValue("true")])
              >>== effect(moveForward)
              >>== { response in
                 if let token = response.value.batchToken {
@@ -216,19 +272,19 @@ public class Sync15BatchClient<T: CleartextPayloadJSON> {
             }
     }
 
-    private func moveForward(response: StorageResponse<POSTResult>) {
+    fileprivate func moveForward(_ response: StorageResponse<POSTResult>) {
         let lastModified = response.metadata.lastModifiedMilliseconds
         self.ifUnmodifiedSince = lastModified
-        self.onCollectionUploaded(response.value, lastModified)
+        _ = self.onCollectionUploaded(response.value, lastModified)
     }
 
-    private func resetBatch() {
+    fileprivate func resetBatch() {
         totalBytes = 0
         totalRecords = 0
         self.batchToken = nil
     }
 
-    private func freezePost() -> [String] {
+    fileprivate func freezePost() -> [String] {
         let lines = records.map { $0.payload }
         self.records = []
         self.postBytes = 0
